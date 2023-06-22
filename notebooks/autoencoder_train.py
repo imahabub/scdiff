@@ -25,7 +25,7 @@ logger.setLevel(logging.INFO)
 
 # %%
 TARGET = 'all'
-DEBUG = True
+DEBUG = False
 
 # %%
 import omegaconf
@@ -246,7 +246,10 @@ def train_auto_encoder(outdir, config, device):
     
     if DEBUG:
         ex_batch = torch.load('/Mounts/rbg-storage1/users/johnyang/cellot/ex_batch_sciplex3.pt', map_location=device)
-    
+        print('MEMORIZING MODEEEE')
+    else:
+        print('NOT memorizing')
+        
     for step in ticker:
 
         model.train()
