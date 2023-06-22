@@ -13,6 +13,10 @@ from cellot.utils import load_config
 from cellot.data.utils import cast_dataset_to_loader
 from cellot.utils.helpers import nest_dict
 
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+logger = logging.getLogger("data_logger")
+logger.setLevel(logging.INFO)
 
 class AnnDataDataset(Dataset):
     def __init__(
@@ -97,6 +101,8 @@ def read_single_anndata(config, path=None):
     if "datasplit" in config:
         data.obs["split"] = split_cell_data(data, **config.datasplit)
 
+    logger.info(f"Loaded cell data with TARGET {config.data['target']} and OBS SHAPE {data.obs.shape}")
+    
     return data
 
 
