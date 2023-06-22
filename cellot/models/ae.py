@@ -167,10 +167,10 @@ class AutoEncoder(nn.Module):
         return loss, comps, outs
 
 
-def compute_scgen_shift(model, dataset, labels):
+def compute_scgen_shift(model, dataset, labels, device):
     model.code_means = dict()
 
-    inputs = next(iter(DataLoader(dataset, batch_size=len(dataset), shuffle=False)))
+    inputs = next(iter(DataLoader(dataset, batch_size=len(dataset), shuffle=False))).to(device)
     codes = model.encode(inputs)
 
     for key in labels.unique():

@@ -297,7 +297,7 @@ def train_auto_encoder(outdir, config, device):
 
     if config.model.name == "scgen" and config.get("compute_scgen_shift", True):
         labels = loader.train.dataset.adata.obs[config.data.condition]
-        compute_scgen_shift(model, loader.train.dataset, labels=labels)
+        compute_scgen_shift(model, loader.train.dataset, labels=labels, device=device)
 
     torch.save(state_dict(model, optim, step=step), cachedir / "last.pt")
 
