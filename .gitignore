@@ -1,5 +1,6 @@
 results
 datasets
+notebooks/runs/
 
 # mac
 .DS_Store
