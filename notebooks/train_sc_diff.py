@@ -28,10 +28,10 @@ logger = logging.getLogger("data_logger")
 logger.setLevel(logging.INFO)
 
 # %%
-DEBUG = True
+DEBUG = False
 TARGET = 'all' if not DEBUG else 'abexinostat'
 LATENT_DIM = 50
-COND_CLASSES = 3 #TODO:
+COND_CLASSES = 189 if TARGET == 'all' else 2
 
 from pathlib import Path
 outdir_path = '/Mounts/rbg-storage1/users/johnyang/cellot/results/sciplex3/full_ae'
@@ -206,12 +206,137 @@ def load(config, device, restore=None, include_model_kwargs=False, **kwargs):
     model, opt = load_model(config, device, restore=restore, **model_kwargs)
 
     return model, opt, loader
-
 # %% [markdown]
 # ### Training
 
 # %%
-ae, _, loader = load(config, 'cuda', restore=cachedir / "last.pt")
+ae = load_model(config, 'cuda', restore=cachedir / "last.pt", input_dim=1000)
+
+from cellot.data.cell import *
+
+def load_cell_data(
+    config,
+    data=None,
+    split_on=None,
+    return_as="loader",
+    include_model_kwargs=False,
+    pair_batch_on=None,
+    **kwargs
+):
+
+    if isinstance(return_as, str):
+        return_as = [return_as]
+
+    assert set(return_as).issubset({"anndata", "dataset", "loader"})
+    config.data.condition = config.data.get("condition", "drug")
+    condition = config.data.condition
+    
+    data = read_single_anndata(config, **kwargs)
+
+    # if "ae_emb" in config.data:
+        # load path to autoencoder
+        # assert config.get("model.name", "cellot") == "cellot"
+    # path_ae = Path(outdir_path)
+    # model_kwargs = {"input_dim": data.n_vars}
+    # config_ae = load_config('/Mounts/rbg-storage1/users/johnyang/cellot/configs/models/scgen.yaml')
+    # ae_model, _ = load_autoencoder_model(
+    #     config_ae, restore=path_ae / "cache/model.pt", **model_kwargs
+    # )
+
+    inputs = torch.Tensor(
+        data.X if not sparse.issparse(data.X) else data.X.todense()
+    )
+
+    genes = data.var_names.to_list()
+    data = anndata.AnnData(
+        ae[0].eval().encode(inputs).detach().numpy(),
+        obs=data.obs.copy(),
+        uns=data.uns.copy(),
+    )
+    data.uns["genes"] = genes
+
+    # cast to dense and check for nans
+    if sparse.issparse(data.X):
+        data.X = data.X.todense()
+    assert not np.isnan(data.X).any()
+
+    dataset_args = dict()
+    model_kwargs = {}
+
+    model_kwargs["input_dim"] = data.n_vars
+
+    # if config.get("model.name") == "cae":
+    condition_labels = sorted(data.obs[condition].cat.categories)
+    model_kwargs["conditions"] = condition_labels
+    dataset_args["obs"] = condition
+    dataset_args["categories"] = condition_labels
+
+    if "training" in config:
+        pair_batch_on = config.training.get("pair_batch_on", pair_batch_on)
+
+    if split_on is None:
+        if config.model.name == "cellot":
+            # datasets & dataloaders accessed as loader.train.source
+            split_on = ["split", "transport"]
+            if pair_batch_on is not None:
+                split_on.append(pair_batch_on)
+
+        elif (config.model.name == "scgen" or config.model.name == "cae"
+              or config.model.name == "popalign"):
+            split_on = ["split"]
+
+        else:
+            raise ValueError
+
+    if isinstance(split_on, str):
+        split_on = [split_on]
+
+    for key in split_on:
+        assert key in data.obs.columns
+
+    if len(split_on) > 0:
+        splits = {
+            (key if isinstance(key, str) else ".".join(key)): data[index]
+            for key, index in data.obs[split_on].groupby(split_on).groups.items()
+        }
+
+        dataset = nest_dict(
+            {
+                key: AnnDataDataset(val.copy(), **dataset_args)
+                for key, val in splits.items()
+            },
+            as_dot_dict=True,
+        )
+    else:
+        dataset = AnnDataDataset(data.copy(), **dataset_args)
+
+    if "loader" in return_as:
+        kwargs = dict(config.dataloader)
+        kwargs.setdefault("drop_last", True)
+        loader = cast_dataset_to_loader(dataset, **kwargs)
+
+    returns = list()
+    for key in return_as:
+        if key == "anndata":
+            returns.append(data)
+
+        elif key == "dataset":
+            returns.append(dataset)
+
+        elif key == "loader":
+            returns.append(loader)
+
+    if include_model_kwargs:
+        returns.append(model_kwargs)
+
+    if len(returns) == 1:
+        return returns[0]
+
+    # returns.append(data)
+
+    return tuple(returns)
+
+cond_datasets = load_cell_data(config, return_as="loader")
 
 # %%
 """R^3 diffusion methods."""
@@ -476,8 +601,8 @@ class ScoreNetwork(nn.Module):
         print(f'Dropout is {self.dropout}')
         
         self.cond_embedding = nn.Embedding(COND_CLASSES, model_dim)
-        self.embed_code_and_t = nn.Linear(LATENT_DIM + 2 * model_dim, model_dim)
-        self.trmr_layer = TransformerEncoderLayer(d_model=model_dim, nhead=8, dim_feedforward=2048, dropout=dropout)
+        self.embed_code_and_t = nn.Linear(LATENT_DIM + (2 * model_dim), model_dim)
+        # self.trmr_layer = TransformerEncoderLayer(d_model=model_dim, nhead=8, dim_feedforward=2048, dropout=dropout)
         self.pred_score = FeedForward(input_dim=model_dim, hidden_dim=64, output_dim=LATENT_DIM)
         self.model = nn.ModuleList([self.embed_code_and_t, self.pred_score]) #*[self.trmr_layer for _ in range(num_layers)], self.pred_score])
         
@@ -487,13 +612,13 @@ class ScoreNetwork(nn.Module):
             # max_positions=100
         )
 
-    def forward(self, x, t, y):
+    def forward(self, xy, t):
+        x, y = xy
         device = x.device
         B, C = x.shape
         t_embed = torch.tile(self.timestep_embedder(torch.tensor([t]).to(device)), dims=[B, 1])
-        y_embed = self.cond_embedding(y).unsqueeze(0)
+        y_embed = self.cond_embedding(y)
         x = torch.cat([x, t_embed, y_embed], dim=-1).to(device)
-        
         for module in self.model[:-1]:  # iterate over all modules except the last one
             x = module(x)
         x = self.model[-1](x.squeeze(0))  # pass through the last module (FeedForward)
@@ -503,111 +628,100 @@ class ScoreNetwork(nn.Module):
 score_network = ScoreNetwork().to(device)
 
 # %%
-sum(p.numel() for p in score_network.parameters())
+# sum(p.numel() for p in score_network.parameters())
 
 # %%
 optimizer = torch.optim.Adam(score_network.parameters(), lr=1e-4)
 
 # %%
-STEP = 0
-ticker = trange(STEP, n_iters, initial=STEP, total=n_iters)
 
-# %%
-iterator = cast_loader_to_iterator(loader, cycle_all=True)
+def tb(name):
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(f'runs/{name}')
+    return writer
 
-# %%
-one = torch.ones((1, 1))
-neg_one = - torch.ones((1, 1))
-null_cond = torch.tensor(0)
-one_cond = torch.tensor(1)
-neg_one_cond = torch.tensor(2)
-
-# %%
-min_t = 0.0
-rng = np.random.default_rng(42)
-
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter('runs/6.30.23_cond')
-
-
-# %%
-def get_inputs_w_cond():
-    if np.random.random() > 0.5:
-        cond = null_cond
-        if np.random.random() > 0.5:
-            inputs = one
-        else:
-            inputs = neg_one
-    else:
-        if np.random.random() > 0.5:
-            cond = one_cond
-            inputs = one
-        else:
-            cond = neg_one_cond
-            inputs = neg_one
-    return inputs, cond
-
-# %%
-def eval(dt=0.001):
-    score_network.eval()
+def setup_run():
+    # %%
     
-    with torch.no_grad():
-        inputs, cond = get_inputs_w_cond()
-        x_t, _ = diffuser.forward_marginal(inputs.numpy(), t=1.0)
-        
-        for i, t in enumerate(np.arange(1.0, 0, -dt)):
-            x_t = torch.tensor(x_t).float().to(device)
-            pred_score = score_network(x_t, t, cond.to(device))
+    min_t = 0.0
+    rng = np.random.default_rng()
+    
+    STEP = 0
+    ticker = trange(STEP, n_iters, initial=STEP, total=n_iters)
+
+    # %%
+    iterator = cast_loader_to_iterator(cond_datasets, cycle_all=True)
+    return iterator, ticker, rng, min_t
+
+
+def train():
+    iterator, ticker, rng, min_t = setup_run()
+    writer = tb('7.3_all')
+
+    def eval(step, dt=0.001):
+        score_network.eval()
+        mses = []
+        with torch.no_grad():
+            for xy in iterator.test:
+                x, y = xy
+                x_t, _ = diffuser.forward_marginal(x.numpy(), t=1.0)
+                
+                for i, t in enumerate(np.arange(1.0, 0, -dt)):
+                    x_t = torch.tensor(x_t).float().to(device)
+                    pred_score = score_network((x_t, y.to(device)), t)
+                    
+                    x_t = diffuser.reverse(x_t=x_t.detach().cpu().numpy(), score_t=pred_score.detach().cpu().numpy(), t=t, dt=dt, center=False)
+                
+                x_0 = x_t
+
+                mse = torch.mean((x - x_0) ** 2)
+                mses.append(mse.item())
+            eval_mse = np.mean(mses)
+            writer.add_scalar('MSE', eval_mse, global_step=step)
+            return eval_mse
+    
+    eval_freq=1000
+    for step in ticker:
+
+        score_network.train()
             
-            x_t = diffuser.reverse(x_t=x_t.detach().cpu().numpy(), score_t=pred_score.detach().cpu().numpy(), t=t, dt=dt, center=False)
+        optimizer.zero_grad()
         
-        x_0 = x_t
-
-        mse = (inputs.item() - x_0.item()) ** 2
-        writer.add_scalar('MSE', mse, global_step=step)
-        return x_0, inputs, mse
-
-# %%
-eval_freq=1000
-
-for step in ticker:
-
-    score_network.train()
+        t = rng.uniform(min_t, 1.0)
         
-    optimizer.zero_grad()
-    
-    t = rng.uniform(min_t, 1.0)
-    
-    inputs, cond = get_inputs_w_cond()
+        x, y = next(iterator.train)
+        
+        x_t, gt_score_t = diffuser.forward_marginal(x.detach().cpu().numpy(), t=t)
+        
+        score_scaling = torch.tensor(diffuser.score_scaling(t)).to(device)
+        gt_score_t = torch.tensor(gt_score_t).to(device)
+        
+        if np.random.random() > 0.5:
+            pred_score_t = score_network((torch.tensor(x_t).float().to(device), y.to(device)), t)
+        else:
+            null_cond = torch.zeros_like(y)
+            pred_score_t = score_network((torch.tensor(x_t).float().to(device), null_cond.to(device)), t)
+
+        score_mse = (gt_score_t - pred_score_t)**2
+        score_loss = torch.sum(
+            score_mse / score_scaling[None, None]**2,
+            dim=(-1, -2)
+        ) #/ (loss_mask.sum(dim=-1) + 1e-10)    
+        
+        score_loss.backward()
+        optimizer.step()
+
+        if step % config.training.logs_freq == 0:
+            # log to logger object
+            # logger.log("train", loss=loss.item(), step=step, **comps)
+            writer.add_scalar('Training loss', score_loss.item(), global_step=step)
+            print(f'At step {step}, TRAINING loss is {score_loss.item()}')
             
-    inputs = inputs.to(device)
-    cond = cond.to(device)
-    
-    x_t, gt_score_t = diffuser.forward_marginal(inputs.detach().cpu().numpy(), t=t)
-    
-    score_scaling = torch.tensor(diffuser.score_scaling(t)).to(device)
-    gt_score_t = torch.tensor(gt_score_t).to(device)
-    
-    pred_score_t = score_network(torch.tensor(x_t).float().to(device), t, cond)
-
-    score_mse = (gt_score_t - pred_score_t)**2
-    score_loss = torch.sum(
-        score_mse / score_scaling[None, None]**2,
-        dim=(-1, -2)
-    ) #/ (loss_mask.sum(dim=-1) + 1e-10)    
-    
-    score_loss.backward()
-    optimizer.step()
-
-    if step % config.training.logs_freq == 0:
-        # log to logger object
-        # logger.log("train", loss=loss.item(), step=step, **comps)
-        writer.add_scalar('Training loss', score_loss.item(), global_step=step)
-        print(f'At step {step}, TRAINING loss is {score_loss.item()}')
-        
-    if step % eval_freq == 0:
-        sampled_x_0, eval_inputs, mse = eval(dt=0.01)
-        print(f'At step {step}, x_0 is {eval_inputs.item()}, sampled x_0 is {sampled_x_0.item()}, \n mse is {mse}')
+        if step % eval_freq == 0:
+            mean_mse = eval(step, dt=0.01)
+            print(f'At step {step}, \n mse is {mean_mse}')
 
 if __name__ == "__main__":
+    train()
 
+# %%
