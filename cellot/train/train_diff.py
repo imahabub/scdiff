@@ -1,7 +1,7 @@
 from omegaconf import DictConfig
 import hydra
 from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from cellot.models.cond_score_module import CondScoreModule
 from cellot.data.sciplex_ae_dm import CellDataModule
 
@@ -10,7 +10,8 @@ def main(cfg: DictConfig) -> None:
     model = CondScoreModule(cfg)
     data_module = CellDataModule(cfg)
 
-    logger = TensorBoardLogger(save_dir='tb_logs')
+    logger = WandbLogger(save_dir='wandb_logs', 
+                         **cfg.experiment.wandb_logger)
     trainer = Trainer(logger=logger, **cfg.trainer)
 
     trainer.fit(model, datamodule=data_module)

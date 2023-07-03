@@ -62,7 +62,7 @@ experiment:
   wandb_logger:
     project: sc_diff
     name: ${experiment.name}
-    dir: ./
+    dir: /Mounts/rbg-storage1/users/johnyang/cellot/
     log_model: all
     tags: ['experimental']
   lr: 0.0001
@@ -71,11 +71,11 @@ experiment:
 trainer:
   accelerator: 'gpu'
   check_val_every_n_epoch: 5
-  log_every_n_steps: 100
+  log_every_n_steps: 2 #TODO: 
   num_sanity_val_steps: 1
   enable_progress_bar: True
   enable_checkpointing: True
-  fast_dev_run: True #TODO:
+  fast_dev_run: False
   profiler: simple
   max_epochs: 10000
   strategy: auto
@@ -84,4 +84,4 @@ trainer:
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   limit_predict_batches: 1.0
-  devices: 1
+  devices: 8
