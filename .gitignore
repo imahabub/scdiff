@@ -2,6 +2,7 @@ results
 datasets
 notebooks/runs/
 runs/
+outputs/
 
 # mac
 .DS_Store

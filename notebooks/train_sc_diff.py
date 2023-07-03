@@ -117,31 +117,6 @@ dataloader:
 config = omegaconf.OmegaConf.create(yaml_str)
 
 # %%
-def load_lr_scheduler(optim, config):
-    if "scheduler" not in config:
-        return None
-
-    return torch.optim.lr_scheduler.StepLR(optim, **config.scheduler)
-
-def check_loss(*args):
-    for arg in args:
-        if torch.isnan(arg):
-            raise ValueError
-
-
-def load_item_from_save(path, key, default):
-    path = Path(path)
-    if not path.exists():
-        return default
-
-    ckpt = torch.load(path)
-    if key not in ckpt:
-        logging.warn(f"'{key}' not found in ckpt: {str(path)}")
-        return default
-
-    return ckpt[key]
-
-# %%
 import cellot.models
 from cellot.data.cell import load_cell_data
 
