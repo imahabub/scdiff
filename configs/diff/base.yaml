@@ -6,6 +6,8 @@ SEED: 42
 AE_PATH: /Mounts/rbg-storage1/users/johnyang/cellot/results/sciplex3/full_ae
 VAL_SIZE: 0.1
 DEVICES: 1
+WARM_START: False
+WARM_START_PATH: null
 
 diffuser:
   min_b: 0.01

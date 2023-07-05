@@ -74,4 +74,5 @@ class CondScoreModule(pl.LightningModule):
         # mses.append(mse.item())
         # eval_mse = np.mean(mses)
         # writer.add_scalar('MSE', eval_mse, global_step=step)
+        self.log('val/mse', mse.item())
         return mse

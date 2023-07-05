@@ -1,6 +1,10 @@
 results
 datasets
 notebooks/runs/
+notebooks/artifacts/
+notebooks/wandb/
+notebooks/lightning_logs/
+notebooks/tb_logs/
 runs/
 outputs/
 
@@ -49,3 +53,5 @@ __pycache__/
 
 # other
 .vscode
+
+# !saved_weights/**/*
