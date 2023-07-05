@@ -4,7 +4,8 @@ LATENT_DIM: 50
 COND_CLASSES: 189
 SEED: 42
 AE_PATH: /Mounts/rbg-storage1/users/johnyang/cellot/results/sciplex3/full_ae
-VAL_SIZE: 0.2
+VAL_SIZE: 0.1
+DEVICES: 1
 
 diffuser:
   min_b: 0.01
@@ -13,7 +14,7 @@ diffuser:
   score_scaling: var
   coordinate_scaling: 1.0
   latent_dim: ${LATENT_DIM}
-  dt: 0.001
+  dt: 0.01
   min_t: 0
 
 ae:
@@ -48,8 +49,9 @@ datasplit:
   random_state: 0
   
 dataloader:
-  batch_size: 32
+  batch_size: 4096
   shuffle: true
+  num_workers: 80
   
 experiment:
   name: base
@@ -70,8 +72,8 @@ experiment:
 
 trainer:
   accelerator: 'gpu'
-  check_val_every_n_epoch: 5
-  log_every_n_steps: 2 #TODO: 
+  check_val_every_n_epoch: 50
+  log_every_n_steps: 100
   num_sanity_val_steps: 1
   enable_progress_bar: True
   enable_checkpointing: True
@@ -84,4 +86,3 @@ trainer:
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   limit_predict_batches: 1.0
-  devices: 8

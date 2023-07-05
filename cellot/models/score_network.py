@@ -48,13 +48,14 @@ class ScoreNetwork(nn.Module):
 
         self.cond_embedding = nn.Embedding(self.cond_classes, self.model_dim)
         self.embed_code_and_t = nn.Linear(self.latent_dim + (2 * self.model_dim), self.model_dim)
-        self.trmr_layer = nn.TransformerEncoderLayer(
-            d_model=self.model_dim, 
-            nhead=self.nhead, 
-            dim_feedforward=self.dim_feedforward, 
-            dropout=self.dropout)
-        self.pred_score = FeedForward(input_dim=self.model_dim, hidden_dim=cfg.ffn_hidden_dim, output_dim=self.latent_dim)
-        self.model = nn.ModuleList([self.embed_code_and_t, *[self.trmr_layer for _ in range(self.n_layers)], self.pred_score])
+        self.ffn = FeedForward(input_dim=self.model_dim, hidden_dim=cfg.ffn_hidden_dim, output_dim=self.latent_dim)
+
+        transformer_layers = [nn.TransformerEncoderLayer(d_model=self.model_dim, 
+                                                        nhead=self.nhead, 
+                                                        dim_feedforward=self.dim_feedforward, 
+                                                        dropout=self.dropout) 
+                            for _ in range(self.n_layers)]
+        self.model = nn.ModuleList([self.embed_code_and_t, *transformer_layers, self.ffn])
 
         self.timestep_embedder = fn.partial(
             get_timestep_embedding,

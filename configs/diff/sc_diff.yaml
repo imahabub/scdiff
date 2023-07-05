@@ -1,0 +1,33 @@
+defaults:
+ - base
+
+score_network:
+  latent_dim: ${LATENT_DIM}
+  cond_classes: ${COND_CLASSES}
+  model_dim: 64
+  n_layers: 12
+  nhead: 8
+  dim_feedforward: 2048
+  dropout: 0.1
+  ffn_hidden_dim: 1024
+
+diffuser:
+  min_b: 0.01
+  max_b: 1.0
+  schedule: linear
+  score_scaling: var
+  coordinate_scaling: 1.0
+  latent_dim: ${LATENT_DIM}
+  dt: 0.001
+  min_t: 0
+
+experiment:
+  name: sc_diff
+  port: 12319
+  wandb_logger:
+    project: sc_diff
+    name: ${experiment.name}
+    dir: /Mounts/rbg-storage1/users/johnyang/cellot/
+    log_model: all
+    tags: ['experimental']
+  lr: 0.0001

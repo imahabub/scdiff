@@ -59,21 +59,19 @@ class CondScoreModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         # Your evaluation code
         # mses = []
+        x, y = batch
+        x_t, _ = self.diffuser.forward_marginal(x.detach().cpu().numpy(), t=1.0)
         
-        with torch.no_grad():
-            x, y = batch
-            x_t, _ = self.diffuser.forward_marginal(x.detach().cpu().numpy(), t=1.0)
+        for i, t in enumerate(np.arange(1.0, 0, -self.dt)):
+            x_t = torch.tensor(x_t).float().to(self.device)
+            pred_score = self.score_network((x_t, y), t)
             
-            for i, t in enumerate(np.arange(1.0, 0, -self.dt)):
-                x_t = torch.tensor(x_t).float().to(self.device)
-                pred_score = self.score_network((x_t, y), t)
-                
-                x_t = self.diffuser.reverse(x_t=x_t.detach().cpu().numpy(), score_t=pred_score.detach().cpu().numpy(), t=t, dt=self.dt, center=False)
-            
-            x_0 = torch.tensor(x_t).to(self.device)
+            x_t = self.diffuser.reverse(x_t=x_t.detach().cpu().numpy(), score_t=pred_score.detach().cpu().numpy(), t=t, dt=self.dt, center=False)
+        
+        x_0 = torch.tensor(x_t).to(self.device)
 
-            mse = torch.mean((x - x_0) ** 2)
-            # mses.append(mse.item())
-            # eval_mse = np.mean(mses)
-            # writer.add_scalar('MSE', eval_mse, global_step=step)
+        mse = torch.mean((x - x_0) ** 2)
+        # mses.append(mse.item())
+        # eval_mse = np.mean(mses)
+        # writer.add_scalar('MSE', eval_mse, global_step=step)
         return mse

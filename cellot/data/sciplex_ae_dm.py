@@ -46,12 +46,18 @@ class CellDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         # DataLoader for the training set
-        return DataLoader(self.train_dataset, batch_size=self.config.dataloader.batch_size, shuffle=True)
+        return DataLoader(self.train_dataset, 
+                          batch_size=self.config.dataloader.batch_size, 
+                          shuffle=True, 
+                          num_workers=self.config.dataloader.num_workers
+                        )
 
     def val_dataloader(self):
         # DataLoader for the validation set
-        return DataLoader(self.val_dataset, batch_size=self.config.dataloader.batch_size)
+        return DataLoader(self.val_dataset, batch_size=self.config.dataloader.batch_size, 
+                                  num_workers=self.config.dataloader.num_workers)
 
     def test_dataloader(self):
         # DataLoader for the test set
-        return DataLoader(self.test_dataset, batch_size=self.config.dataloader.batch_size)
+        return DataLoader(self.test_dataset, batch_size=self.config.dataloader.batch_size, 
+                                  num_workers=self.config.dataloader.num_workers)
