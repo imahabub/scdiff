@@ -162,9 +162,11 @@ def load_ae_cell_data(
         include_model_kwargs=False,
         pair_batch_on=None,
         ae=None,
+        encode_latents=False,
+        sel_mg=None,
         **kwargs
     ):
-        assert ae is not None, "ae must be provided"
+        assert ae is not None or not encode_latents, "ae must be provided"
         
         if isinstance(return_as, str):
             return_as = [return_as]
@@ -179,18 +181,23 @@ def load_ae_cell_data(
             data.X if not sparse.issparse(data.X) else data.X.todense()
         )
 
-        genes = data.var_names.to_list()
-        data = anndata.AnnData(
-            ae.eval().encode(inputs).detach().numpy(),
-            obs=data.obs.copy(),
-            uns=data.uns.copy(),
-        )
-        data.uns["genes"] = genes
+        if encode_latents:
+            genes = data.var_names.to_list()
+            data = anndata.AnnData(
+                ae.eval().encode(inputs).detach().numpy(),
+                obs=data.obs.copy(),
+                uns=data.uns.copy(),
+            )
+            data.uns["genes"] = genes
+
 
         # cast to dense and check for nans
         if sparse.issparse(data.X):
             data.X = data.X.todense()
         assert not np.isnan(data.X).any()
+
+        if sel_mg is not None:
+            data = data[:, sel_mg]
 
         dataset_args = dict()
         model_kwargs = {}

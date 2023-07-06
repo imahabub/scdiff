@@ -187,13 +187,15 @@ def load_model(config, device, restore=None, **kwargs):
 def load(config, device, restore=None, include_model_kwargs=False, **kwargs):
 
     loader, model_kwargs = load_data(config, include_model_kwargs=True, **kwargs)
+    dataset, _ = load_data(config, include_model_kwargs=True, return_as='dataset', **kwargs)
+
 
     model, opt = load_model(config, device, restore=restore, **model_kwargs)
 
     # if include_model_kwargs:
     #     return model, opt, loader, model_kwargs
 
-    return model, opt, loader
+    return model, opt, loader, dataset
 
 # %% [markdown]
 # ### Training
@@ -225,7 +227,12 @@ def train_auto_encoder(outdir, config, device):
 
     logger = Logger(outdir / "cache/scalars")
     cachedir = outdir / "cache"
-    model, optim, loader = load(config, device, restore=cachedir / "last.pt")
+    model, optim, loader, dataset = load(config, device, restore=cachedir / "last.pt")
+    
+    print('Saving test and train dataset splits')
+    torch.save(dataset.test, cachedir / "test.pt")
+    torch.save(dataset.train, cachedir / "train.pt")
+    print('Done saving test and train dataset splits')
 
     iterator = cast_loader_to_iterator(loader, cycle_all=True)
     scheduler = load_lr_scheduler(optim, config)
@@ -308,7 +315,7 @@ def train_auto_encoder(outdir, config, device):
 
 # %%
 from pathlib import Path
-outdir_path = '/Mounts/rbg-storage1/users/johnyang/cellot/results/sciplex3/full_ae'
+outdir_path = '/Mounts/rbg-storage1/users/johnyang/cellot/results/sciplex3/7.6.23.ae_retrain'
 outdir = Path(outdir_path)
 
 # %%
