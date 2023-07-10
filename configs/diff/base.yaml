@@ -3,11 +3,12 @@ TARGET: all
 LATENT_DIM: 50
 COND_CLASSES: 189
 SEED: 42
-AE_PATH: /Mounts/rbg-storage1/users/johnyang/cellot/results/sciplex3/full_ae
+AE_PATH: /Mounts/rbg-storage1/users/johnyang/cellot/saved_weights/ae/ae.pt
 VAL_SIZE: 0.1
 DEVICES: 1
 WARM_START: False
 WARM_START_PATH: null
+MODEL_CLASS: CondScoreModule
 
 diffuser:
   min_b: 0.01
@@ -35,6 +36,7 @@ score_network:
   dim_feedforward: 128
   dropout: 0.1
   ffn_hidden_dim: 64
+  extra_null_cond_embedding: False
 
 
 data:

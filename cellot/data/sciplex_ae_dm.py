@@ -15,13 +15,8 @@ class CellDataModule(pl.LightningDataModule):
 
         
     def get_ae(self, path):
-        outdir = Path(path)
-        outdir.mkdir(exist_ok=True, parents=True)
-
-        cachedir = outdir / "cache"
-        cachedir.mkdir(exist_ok=True)
         
-        ae = load_ae(self.config, device='cpu', restore=cachedir / "last.pt", input_dim=1000)
+        ae = load_ae(self.config, device='cpu', restore=path, input_dim=1000)
         return ae
 
     def prepare_data(self):
@@ -33,7 +28,7 @@ class CellDataModule(pl.LightningDataModule):
         torch.manual_seed(self.seed)
 
         ae = self.get_ae(self.config.AE_PATH)
-        self.data = load_ae_cell_data(self.config, return_as="dataset", ae=ae)
+        self.data = load_ae_cell_data(self.config, return_as="dataset", ae=ae, encode_latents=True)
 
         # Create datasets
         full_train_dataset = self.data.train

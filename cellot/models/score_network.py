@@ -38,6 +38,7 @@ class ScoreNetwork(nn.Module):
         self.latent_dim = cfg.latent_dim
         self.model_dim = cfg.model_dim
         self.cond_classes = cfg.cond_classes
+        self.extra_null_cond_embedding = cfg.extra_null_cond_embedding
         self.dropout = cfg.dropout
         self.n_layers = cfg.n_layers
         self.nhead = cfg.nhead
@@ -46,7 +47,13 @@ class ScoreNetwork(nn.Module):
 
         print(f'Dropout is {self.dropout}')
 
-        self.cond_embedding = nn.Embedding(self.cond_classes, self.model_dim)
+        if self.extra_null_cond_embedding:
+            self.cond_embedding = nn.Embedding(self.cond_classes + 1, self.model_dim)
+            self.null_cond_idx = self.cond_classes
+        else:
+            self.cond_embedding = nn.Embedding(self.cond_classes, self.model_dim)
+            self.null_cond_idx = 0
+        
         self.embed_code_and_t = nn.Linear(self.latent_dim + (2 * self.model_dim), self.model_dim)
         self.ffn = FeedForward(input_dim=self.model_dim, hidden_dim=cfg.ffn_hidden_dim, output_dim=self.latent_dim)
 

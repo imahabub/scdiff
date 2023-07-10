@@ -76,3 +76,32 @@ class CondScoreModule(pl.LightningModule):
         # writer.add_scalar('MSE', eval_mse, global_step=step)
         self.log('val/mse', mse.item())
         return mse
+    
+class CondScoreModuleV2(CondScoreModule):
+
+    def __init__(self, hparams):
+        super().__init__(hparams)
+        
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        t = np.random.uniform(self.min_t, 1.0)
+
+        x_t, gt_score_t = self.diffuser.forward_marginal(x.detach().cpu().numpy(), t=t)
+
+        score_scaling = torch.tensor(self.diffuser.score_scaling(t)).to(self.device)
+        gt_score_t = torch.tensor(gt_score_t).to(self.device)
+
+        if np.random.random() > 0.5:
+            pred_score_t = self((torch.tensor(x_t).float().to(self.device), y.to(self.device)), t)
+        else:
+            null_cond = torch.ones_like(y) * self.score_network.null_cond_idx
+            pred_score_t = self((torch.tensor(x_t).float().to(self.device), null_cond.to(self.device)), t)
+
+        score_mse = (gt_score_t - pred_score_t)**2
+        score_loss = torch.sum(
+            score_mse / score_scaling[None, None]**2,
+            dim=(-1, -2)
+        ) 
+
+        self.log('Training loss', score_loss.item())
+        return score_loss
