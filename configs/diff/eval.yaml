@@ -1,0 +1,13 @@
+defaults:
+  - sc_diff
+
+N_MARKERS: 50
+
+infer:
+  lamb: 4
+  dt: 0.01
+  t_start: 1.0
+  cond: True
+
+dataloader:
+  batch_size: 256

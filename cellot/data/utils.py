@@ -214,18 +214,19 @@ def load_ae_cell_data(
             pair_batch_on = config.training.get("pair_batch_on", pair_batch_on)
 
         if split_on is None:
-            # if config.model.name == "cellot":
-            #     # datasets & dataloaders accessed as loader.train.source
-            #     split_on = ["split", "transport"]
-            #     if pair_batch_on is not None:
-            #         split_on.append(pair_batch_on)
+            raise ValueError("split_on must be provided")
+        #     # i:f config.model.name == "cellot"
+        #     #     # datasets & dataloaders accessed as loader.train.source
+        #     #     split_on = ["split", "transport"]
+        #     #     if pair_batch_on is not None:
+        #     #         split_on.append(pair_batch_on)
 
-            # if (config.ae.name == "scgen" #or config.ae.name == "cae"
-            #     #or config.ae.name == "popalign"):
-            split_on = ["split"]
+        #     # if (config.ae.name == "scgen" #or config.ae.name == "cae"
+        #     #     #or config.ae.name == "popalign"):
+        #     split_on = ["split"]
 
-            # else:
-            #     raise ValueError
+        #     # else:
+        #     #     raise ValueError
 
         if isinstance(split_on, str):
             split_on = [split_on]
