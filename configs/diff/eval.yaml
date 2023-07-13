@@ -2,6 +2,7 @@ defaults:
   - sc_diff
 
 N_MARKERS: 50
+EVAL_NAME: eval_base
 
 infer:
   lamb: 4
