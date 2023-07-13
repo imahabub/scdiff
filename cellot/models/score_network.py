@@ -5,15 +5,33 @@ import math
 import functools as fn
 
 class FeedForward(nn.Module):
-    def __init__(self, input_dim=128, hidden_dim=64, output_dim=50):
+    def __init__(self, input_dim, n_layers, model_dim, final_layers, output_dim):
         super(FeedForward, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.layers = nn.ModuleList()
+        prev_dim = input_dim
+        
+        for _ in range(n_layers):
+            self.layers.append(nn.Linear(prev_dim, model_dim))
+            prev_dim = model_dim
+        
+        if isinstance(final_layers, list):
+            for hidden_dim in final_layers:
+                self.layers.append(nn.Linear(prev_dim, hidden_dim))
+                prev_dim = hidden_dim
+        elif isinstance(final_layers, int):
+            self.layers.append(nn.Linear(prev_dim, final_layers))
+            prev_dim = final_layers
+        else:
+            raise ValueError(f"final_layers must be list or int, got {type(final_layers)}")
+            
+        self.layers.append(nn.Linear(prev_dim, output_dim))
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
+        for layer in self.layers[:-1]:
+            x = F.relu(layer(x))
+        x = self.layers[-1](x)
         return x
+
     
 def get_timestep_embedding(timesteps, embedding_dim, max_positions=10000):
     # Code from https://github.com/hojonathanho/diffusion/blob/master/diffusion_tf/nn.py
@@ -36,14 +54,18 @@ class ScoreNetwork(nn.Module):
         super(ScoreNetwork, self).__init__()
 
         self.latent_dim = cfg.latent_dim
+        self.input_dim = cfg.input_dim
         self.model_dim = cfg.model_dim
+        self.n_layers = cfg.n_layers
+        self.final_layers = cfg.final_layers
+
+        
         self.cond_classes = cfg.cond_classes
         self.extra_null_cond_embedding = cfg.extra_null_cond_embedding
         self.dropout = cfg.dropout
-        self.n_layers = cfg.n_layers
-        self.nhead = cfg.nhead
-        self.dim_feedforward = cfg.dim_feedforward
-        self.ffn_hidden_dim = cfg.ffn_hidden_dim
+        # self.nhead = cfg.nhead
+        # self.dim_feedforward = cfg.dim_feedforward
+        # self.ffn_hidden_dims = cfg.ffn_hidden_dims
 
         print(f'Dropout is {self.dropout}')
 
@@ -55,14 +77,15 @@ class ScoreNetwork(nn.Module):
             self.null_cond_idx = 0
         
         self.embed_code_and_t = nn.Linear(self.latent_dim + (2 * self.model_dim), self.model_dim)
-        self.ffn = FeedForward(input_dim=self.model_dim, hidden_dim=cfg.ffn_hidden_dim, output_dim=self.latent_dim)
+        self.ffn = FeedForward(input_dim=self.model_dim, model_dim=self.model_dim, n_layers=self.n_layers, final_layers=self.final_layers, output_dim=self.latent_dim)
 
-        transformer_layers = [nn.TransformerEncoderLayer(d_model=self.model_dim, 
-                                                        nhead=self.nhead, 
-                                                        dim_feedforward=self.dim_feedforward, 
-                                                        dropout=self.dropout) 
-                            for _ in range(self.n_layers)]
-        self.model = nn.ModuleList([self.embed_code_and_t, *transformer_layers, self.ffn])
+        # transformer_layers = [nn.TransformerEncoderLayer(d_model=self.model_dim, 
+        #                                                 nhead=self.nhead, 
+        #                                                 dim_feedforward=self.dim_feedforward, 
+        #                                                 dropout=self.dropout) 
+        #                     for _ in range(self.n_layers)]
+        # self.model = nn.ModuleList([self.embed_code_and_t, *transformer_layers, self.ffn])
+        self.model = nn.ModuleList([self.embed_code_and_t, self.ffn])
 
         self.timestep_embedder = fn.partial(
             get_timestep_embedding,

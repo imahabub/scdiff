@@ -129,7 +129,7 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.TARGET != 'all':
         n_markers = cfg.N_MARKERS
-        sel_mg, gene_idxs = load_markers(cfg)
+        sel_mg, gene_idxs, gene_names = load_markers(cfg)
     else:
         n_markers = 1000
         gene_idxs = np.arange(1000)

@@ -48,7 +48,7 @@ class CondScoreModule(pl.LightningModule):
             dim=(-1, -2)
         ) 
 
-        self.log('Training loss', score_loss.item())
+        self.log('train/score_mse_loss', score_loss.item())
         return score_loss
 
     def configure_optimizers(self):
@@ -103,5 +103,5 @@ class CondScoreModuleV2(CondScoreModule):
             dim=(-1, -2)
         ) 
 
-        self.log('Training loss', score_loss.item())
+        self.log('train/score_mse_loss', score_loss.item())
         return score_loss

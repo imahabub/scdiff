@@ -30,12 +30,11 @@ ae:
 score_network:
   latent_dim: ${LATENT_DIM}
   cond_classes: ${COND_CLASSES}
+  input_dim: 256
   model_dim: 64
-  n_layers: 2
-  nhead: 1
-  dim_feedforward: 128
   dropout: 0.1
-  ffn_hidden_dim: 64
+  n_layers: 4
+  final_layers: 64
   extra_null_cond_embedding: False
 
 

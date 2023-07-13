@@ -1,10 +1,13 @@
 from omegaconf import DictConfig
 import hydra
 from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
 from cellot.models.cond_score_module import CondScoreModule, CondScoreModuleV2
 from cellot.data.sciplex_ae_dm import CellDataModule
 from cellot.train.utils import get_free_gpu
+import os
 
 @hydra.main(config_path="../../configs/diff", config_name="base.yaml")
 def main(cfg: DictConfig) -> None:
@@ -24,8 +27,8 @@ def main(cfg: DictConfig) -> None:
 
     trainer_devices = [replica_id] if cfg.experiment.dist_mode == 'single' else cfg.DEVICES
     
-    logger = WandbLogger(save_dir='wandb_logs', config=cfg,
-                         **cfg.experiment.wandb_logger)
+    logger = WandbLogger(**cfg.experiment.wandb_logger)
+
     trainer = Trainer(logger=logger, devices=trainer_devices, **cfg.trainer)
 
     trainer.fit(model, datamodule=data_module)
