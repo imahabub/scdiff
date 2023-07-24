@@ -243,3 +243,54 @@ class ConditionalAutoEncoder(AutoEncoder):
         loss, comps = self.loss(values, outs)
 
         return loss, comps, outs
+
+class VariationalAutoEncoder(ConditionalAutoEncoder):
+    def __init__(self, *args, **kwargs):
+        super(VariationalAutoEncoder, self).__init__(*args, **kwargs)
+
+    def build_encoder(self, input_dim, latent_dim, hidden_units, **kwargs):
+        self.encoder = super().build_encoder(
+            input_dim=input_dim, #+ self.n_cats,
+            latent_dim=latent_dim,
+            hidden_units=hidden_units,
+            **kwargs
+        )
+        
+        self.mu = nn.Linear(latent_dim, latent_dim)
+        self.log_var = nn.Linear(latent_dim, latent_dim)
+
+        # return selfself.mu, self.log_var
+
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def encode(self, inputs, **kwargs):
+        data, labels = inputs
+        cond = self.condition(data, labels)
+        hidden = self.encoder(cond)
+        mu = self.mu(hidden)
+        log_var = self.log_var(hidden)
+        z = self.reparameterize(mu, log_var)
+        return z, mu, log_var
+
+    def forward(self, inputs, beta=None, cond=True, **kwargs):
+        values, labels = inputs
+        if not cond:
+            labels = torch.zeros_like(labels)
+        z, mu, log_var = self.encode((values, labels), **kwargs)
+        recon = self.decode((z, labels), **kwargs)
+        outputs = self.Outputs(recon, z)
+
+        kl_divergence = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+        kl_divergence = max(kl_divergence, 0)
+        
+        recon_loss, _ = self.loss(values, outputs)
+
+        if beta is None:
+            beta = self.beta
+            
+        loss = recon_loss + beta * kl_divergence
+        return loss, _, outputs
+

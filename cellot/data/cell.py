@@ -184,7 +184,7 @@ def load_cell_data(
 
     model_kwargs["input_dim"] = data.n_vars
 
-    if config.get("model.name") == "cae":
+    if config.get("model.name") == "cae" or config.model.name == 'cae' or config.model.name == 'vae':
         condition_labels = sorted(data.obs[condition].cat.categories)
         model_kwargs["conditions"] = condition_labels
         dataset_args["obs"] = condition
@@ -200,7 +200,7 @@ def load_cell_data(
             if pair_batch_on is not None:
                 split_on.append(pair_batch_on)
 
-        elif (config.model.name == "scgen" or config.model.name == "cae"
+        elif (config.model.name == "scgen" or config.model.name == "cae" or config.model.name == 'vae'
               or config.model.name == "popalign"):
             split_on = ["split"]
 

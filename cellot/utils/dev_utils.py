@@ -1,6 +1,7 @@
 import wandb
 import numpy as np
 from cellot.losses.mmd import mmd_distance
+from cellot.data.cell import read_single_anndata
 
 def get_ckpt_path_from_artifact_id(artifact_id):
     run = wandb.init()
@@ -12,25 +13,32 @@ def get_ckpt_path_from_artifact_id(artifact_id):
 def compute_mmd_loss(lhs, rhs, gammas):
     return np.mean([mmd_distance(lhs, rhs, g) for g in gammas])
 
-from cellot.data.cell import read_single_anndata
-def load_markers(config, n_genes=50):
+def load_markers(config, n_genes=50, gene_pool=None):
     data = read_single_anndata(config, path=None)
     key = f'marker_genes-{config.data.condition}-rank'
 
-    # rebuttal preprocessing stored marker genes using
-    # a generic marker_genes-condition-rank key
-    # instead of e.g. marker_genes-drug-rank
-    # let's just patch that here:
     if key not in data.varm:
         key = 'marker_genes-condition-rank'
         print('WARNING: using generic condition marker genes')
+        
+    if gene_pool is not None:
+        gene_pool = set(gene_pool)
+        potential_mgs = set(data.varm[key].index)
+        valid_genes = potential_mgs.intersection(gene_pool)
+    else:
+        valid_genes = data.varm[key].index
+
+    # Map from gene names to their original row indices
+    gene_to_row_index = {gene: idx for idx, gene in enumerate(data.varm[key].index)}
 
     sel_mg = (
-        data.varm[key][config.data.target]
+        data.varm[key].loc[valid_genes][config.data.target]
         .sort_values()
         .index
     )[:n_genes]
-    marker_gene_indices = [i for i, gene in enumerate(data.var_names) if gene in sel_mg]
+
+    # Convert sorted gene names to their original row indices
+    marker_gene_indices = [gene_to_row_index[gene] for gene in sel_mg]
 
     return sel_mg, marker_gene_indices
 

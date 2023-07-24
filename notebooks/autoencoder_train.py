@@ -15,12 +15,45 @@ from cellot.data.utils import cast_loader_to_iterator
 from cellot.models.ae import compute_scgen_shift
 from tqdm import trange
 
-from cellot.models.ae import AutoEncoder
+from cellot.models.ae import AutoEncoder, ConditionalAutoEncoder, VariationalAutoEncoder
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 logger = logging.getLogger("data_logger")
 logger.setLevel(logging.INFO)
+
+
+import argparse
+import ast
+
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    # Argument for model.hidden_units. Assumes a list of integers in the format [int, int, ...]
+    parser.add_argument("--hidden_units", type=str, default="[512, 512]",
+                        help="List of hidden units for the model. Should be a list in the format [int, int, ...]. Default is [512, 512].")
+
+    # Argument for model.dropout
+    parser.add_argument("--dropout", type=float, default=0.0,
+                        help="Dropout for the model. Default is 0.0.")
+
+    # Argument for model.latent_dim
+    parser.add_argument("--latent_dim", type=int, default=50,
+                        help="Latent dimension for the model. Default is 50.")
+    
+    # Argument for output directory
+    parser.add_argument("--outdir", type=str, required=True,
+                        help="Output directory path. Default is current directory.")
+    
+    parser.add_argument("--model", type=str, default="scgen",
+                        help="Model name. Default is scgen.")
+    
+    args = parser.parse_args()
+
+    # Convert hidden_units from string to list of integers
+    args.hidden_units = ast.literal_eval(args.hidden_units)
+
+    return args
 
 
 # %%
@@ -37,48 +70,6 @@ else:
     n_iters = 250000
     batch_size = 256
 
-yaml_str = f"""
-model:
-   name: scgen
-   beta: 0.0
-   dropout: 0.0
-   hidden_units: [512, 512]
-   latent_dim: 50
-
-optim:
-   lr: 0.001
-   optimizer: Adam
-   weight_decay: 1.0e-05
-
-scheduler:
-   gamma: 0.5
-   step_size: 100000
-
-training:
-  cache_freq: 10000
-  eval_freq: 2500
-  logs_freq: 250
-  n_iters: {n_iters}
-
-data:
-  type: cell
-  source: control
-  condition: drug
-  path: /Mounts/rbg-storage1/users/johnyang/cellot/datasets/scrna-sciplex3/hvg.h5ad
-  target: {TARGET}
-
-datasplit:
-    groupby: drug   
-    name: train_test
-    test_size: 0.2
-    random_state: 0
-
-dataloader:
-    batch_size: {batch_size}
-    shuffle: true
-"""
-
-config = omegaconf.OmegaConf.create(yaml_str)
 
 # %% [markdown]
 # ### Utils
@@ -145,8 +136,12 @@ def load_model(config, device, restore=None, **kwargs):
         if name == "scgen":
             model = AutoEncoder
 
-        # elif name == "cae":
-        #     model = ConditionalAutoEncoder
+        elif name == "cae":
+            model = ConditionalAutoEncoder
+        
+        elif name == "vae":
+            model = VariationalAutoEncoder
+        
         else:
             raise ValueError
 
@@ -165,42 +160,18 @@ def load_model(config, device, restore=None, **kwargs):
     logger.info(f'Model on device {next(model.parameters()).device}')
 
     return model, optim
-    # name = config.model.name
-    # if name == "cellot":
-    #     loadfxn = cellot.models.load_cellot_model
-
-    # elif name == "scgen":
-    #     loadfxn = cellot.models.load_autoencoder_model
-
-    # elif name == "cae":
-    #     loadfxn = cellot.models.load_autoencoder_model
-
-    # elif name == "popalign":
-    #     loadfxn = cellot.models.load_popalign_model
-
-    # else:
-    #     raise ValueError
-
-    # return loadfxn(config, restore=restore, **kwargs)
 
 
 def load(config, device, restore=None, include_model_kwargs=False, **kwargs):
 
     loader, model_kwargs = load_data(config, include_model_kwargs=True, **kwargs)
-    dataset, _ = load_data(config, include_model_kwargs=True, return_as='dataset', **kwargs)
+    # dataset, _ = load_data(config, include_model_kwargs=True, return_as='dataset', **kwargs)
 
 
     model, opt = load_model(config, device, restore=restore, **model_kwargs)
 
-    # if include_model_kwargs:
-    #     return model, opt, loader, model_kwargs
+    return model, opt, loader# , dataset
 
-    return model, opt, loader, dataset
-
-# %% [markdown]
-# ### Training
-
-# %%
 def train_auto_encoder(outdir, config, device):
     def state_dict(model, optim, **kwargs):
         state = {
@@ -227,12 +198,12 @@ def train_auto_encoder(outdir, config, device):
 
     logger = Logger(outdir / "cache/scalars")
     cachedir = outdir / "cache"
-    model, optim, loader, dataset = load(config, device, restore=cachedir / "last.pt")
+    model, optim, loader = load(config, device, restore=cachedir / "last.pt")
     
-    print('Saving test and train dataset splits')
-    torch.save(dataset.test, cachedir / "test.pt")
-    torch.save(dataset.train, cachedir / "train.pt")
-    print('Done saving test and train dataset splits')
+    # print('Saving test and train dataset splits')
+    # torch.save(dataset.test, cachedir / "test.pt")
+    # torch.save(dataset.train, cachedir / "train.pt")
+    # print('Done saving test and train dataset splits')
 
     iterator = cast_loader_to_iterator(loader, cycle_all=True)
     scheduler = load_lr_scheduler(optim, config)
@@ -264,7 +235,9 @@ def train_auto_encoder(outdir, config, device):
             inputs = ex_batch
         else:
             inputs = next(iterator.train)
-            inputs = inputs.to(device)
+            inputs = [x.to(device) for x in inputs]
+            if config.model.name == "scgen":
+                inputs = inputs[0]
         optim.zero_grad()
         loss, comps, _ = model(inputs)
         loss = loss.mean()
@@ -284,7 +257,9 @@ def train_auto_encoder(outdir, config, device):
                 test_inputs = ex_batch
             else:
                 test_inputs = next(iterator.test)
-                test_inputs = test_inputs.to(device)
+                test_inputs = [x.to(device) for x in test_inputs]
+                if config.model.name == "scgen":
+                    test_inputs = test_inputs[0]
                 
             eval_loss = evaluate(test_inputs)
             if eval_loss < best_eval_loss:
@@ -302,30 +277,14 @@ def train_auto_encoder(outdir, config, device):
         if scheduler is not None:
             scheduler.step()
 
-    if config.model.name == "scgen" and config.get("compute_scgen_shift", True):
-        labels = loader.train.dataset.adata.obs[config.data.condition]
-        compute_scgen_shift(model, loader.train.dataset, labels=labels, device=device)
+    # if config.model.name == "scgen" and config.get("compute_scgen_shift", True):
+    #     labels = loader.train.dataset.adata.obs[config.data.condition]
+    #     compute_scgen_shift(model, loader.train.dataset, labels=labels, device=device)
 
     torch.save(state_dict(model, optim, step=step), cachedir / "last.pt")
 
     logger.flush()
 
-# %% [markdown]
-# ### Outdir
-
-# %%
-from pathlib import Path
-outdir_path = '/Mounts/rbg-storage1/users/johnyang/cellot/results/sciplex3/7.6.23.ae_retrain'
-outdir = Path(outdir_path)
-
-# %%
-outdir.mkdir(exist_ok=True, parents=True)
-
-cachedir = outdir / "cache"
-cachedir.mkdir(exist_ok=True)
-
-# %% [markdown]
-# ### Start Training
 
 # %%
 import torch
@@ -343,12 +302,69 @@ def get_free_gpu():
     print(f"Using GPUs: {chosen_gpu}")
     return chosen_gpu
 
-status = cachedir / "status"
-status.write_text("running")
+# status = cachedir / "status"
+# status.write_text("running")
 
 # %%
 if __name__ == "__main__":
     device = get_free_gpu()
+    args = get_args()
+    # Use args.hidden_units, args.dropout, and args.latent_dim as necessary in your code
+    print(f"model: {args.model}")
+    print(f"hidden_units: {args.hidden_units}")
+    print(f"dropout: {args.dropout}")
+    print(f"latent_dim: {args.latent_dim}")
+
+    yaml_str = f"""
+    model:
+        name: {args.model}
+        beta: 0.0
+        dropout: {args.dropout}
+        hidden_units: {args.hidden_units}
+        latent_dim: {args.latent_dim}
+
+    optim:  
+        lr: 0.001
+        optimizer: Adam
+        weight_decay: 1.0e-05
+
+    scheduler:
+        gamma: 0.5
+        step_size: 100000
+
+    training:
+        cache_freq: 10000
+        eval_freq: 2500
+        logs_freq: 250
+        n_iters: {n_iters}
+
+    data:
+        type: cell
+        source: control
+        condition: drug
+        path: /Mounts/rbg-storage1/users/johnyang/cellot/datasets/scrna-sciplex3/hvg.h5ad
+        target: {TARGET}
+
+    datasplit:
+        groupby: drug   
+        name: train_test
+        test_size: 0.2
+        random_state: 0
+
+    dataloader:
+        batch_size: {batch_size}
+        shuffle: true
+    """
+
+    config = omegaconf.OmegaConf.create(yaml_str)
+    # %%
+    from pathlib import Path
+    outdir_path = args.outdir
+    outdir = Path(outdir_path)
+
+    # %%
+    outdir.mkdir(exist_ok=True, parents=True)
+    cachedir = outdir / "cache"
+    cachedir.mkdir(exist_ok=True)
+
     train_auto_encoder(outdir, config, f'cuda:{device}')
-
-
