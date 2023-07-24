@@ -39,7 +39,7 @@ class CondScoreModule(pl.LightningModule):
         if np.random.random() > 0.5:
             pred_score_t = self((torch.tensor(x_t).float().to(self.device), y.to(self.device)), t)
         else:
-            null_cond = torch.zeros_like(y)
+            null_cond = torch.ones_like(y) * self.score_network.null_cond_idx
             pred_score_t = self((torch.tensor(x_t).float().to(self.device), null_cond.to(self.device)), t)
 
         score_mse = (gt_score_t - pred_score_t)**2
@@ -55,53 +55,31 @@ class CondScoreModule(pl.LightningModule):
         # Your optimizer configuration
         optimizer = torch.optim.Adam(self.parameters(), lr=self.cfg.experiment.lr)
         return optimizer
+    
+    def forward_ODE_step(self, x_t, score_t, t, dt):
+        return self.diffuser.ode(x_t=x_t.detach().cpu().numpy(), score_t=score_t.detach().cpu().numpy(), t=t, dt=dt)
+    
+    def reverse_ODE_step(self, x_t, score_t, t, dt):
+        return self.diffuser.ode(x_t=x_t.detach().cpu().numpy(), score_t=score_t.detach().cpu().numpy(), t=t, dt=-dt)
 
     def validation_step(self, batch, batch_idx):
-        # Your evaluation code
-        # mses = []
         x, y = batch
-        x_t, _ = self.diffuser.forward_marginal(x.detach().cpu().numpy(), t=1.0)
         
-        for i, t in enumerate(np.arange(1.0, 0, -self.dt)):
-            x_t = torch.tensor(x_t).float().to(self.device)
-            pred_score = self.score_network((x_t, y), t)
-            
-            x_t = self.diffuser.reverse(x_t=x_t.detach().cpu().numpy(), score_t=pred_score.detach().cpu().numpy(), t=t, dt=self.dt, center=False)
+        x_t_fwd = x
+        for fwd_t in np.arange(0, 1.0, self.dt):
+            x_t_fwd = torch.tensor(x_t_fwd).float().to(self.device)
+            fwd_cond_score = self.score_network((x_t_fwd, y), fwd_t)
+            x_t_fwd = self.forward_ODE_step(x_t_fwd, fwd_cond_score, fwd_t, self.dt)
         
-        x_0 = torch.tensor(x_t).to(self.device)
+        x_t_rvs = x_t_fwd
+        for rvs_t in np.arange(1.0, 0, -self.dt):
+            x_t_rvs = torch.tensor(x_t_rvs).float().to(self.device)
+            cond_score = self.score_network((x_t_rvs, y), rvs_t)
+            pred_score = cond_score
+            x_t_rvs = self.reverse_ODE_step(x_t_rvs, pred_score, rvs_t, self.dt)
+        
+        x_0 = torch.tensor(x_t_rvs).to(self.device)
 
         mse = torch.mean((x - x_0) ** 2)
-        # mses.append(mse.item())
-        # eval_mse = np.mean(mses)
-        # writer.add_scalar('MSE', eval_mse, global_step=step)
         self.log('val/mse', mse.item())
         return mse
-    
-class CondScoreModuleV2(CondScoreModule):
-
-    def __init__(self, hparams):
-        super().__init__(hparams)
-        
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        t = np.random.uniform(self.min_t, 1.0)
-
-        x_t, gt_score_t = self.diffuser.forward_marginal(x.detach().cpu().numpy(), t=t)
-
-        score_scaling = torch.tensor(self.diffuser.score_scaling(t)).to(self.device)
-        gt_score_t = torch.tensor(gt_score_t).to(self.device)
-
-        if np.random.random() > 0.5:
-            pred_score_t = self((torch.tensor(x_t).float().to(self.device), y.to(self.device)), t)
-        else:
-            null_cond = torch.ones_like(y) * self.score_network.null_cond_idx
-            pred_score_t = self((torch.tensor(x_t).float().to(self.device), null_cond.to(self.device)), t)
-
-        score_mse = (gt_score_t - pred_score_t)**2
-        score_loss = torch.sum(
-            score_mse / score_scaling[None, None]**2,
-            dim=(-1, -2)
-        ) 
-
-        self.log('train/score_mse_loss', score_loss.item())
-        return score_loss

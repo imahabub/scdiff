@@ -15,7 +15,6 @@ class CellDataModule(pl.LightningDataModule):
 
         
     def get_ae(self, path):
-        
         ae = load_ae(self.config, device='cpu', restore=path, input_dim=1000)
         return ae
 
@@ -27,8 +26,11 @@ class CellDataModule(pl.LightningDataModule):
         # Load data
         torch.manual_seed(self.seed)
 
-        ae = self.get_ae(self.config.AE_PATH)
-        self.data = load_ae_cell_data(self.config, return_as="dataset", ae=ae, encode_latents=True, split_on=['split']) #TODO: Move this to `prepare_data` for distributed?
+        if self.config.AE_PATH is not None:
+            ae = self.get_ae(self.config.AE_PATH)
+            self.data = load_ae_cell_data(self.config, return_as="dataset", ae=ae, encode_latents=True, split_on=['split'])
+        else:
+            self.data = load_ae_cell_data(self.config, return_as="dataset", split_on=['split'])
 
         # Create datasets
         full_train_dataset = self.data.train

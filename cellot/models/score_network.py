@@ -53,12 +53,12 @@ class ScoreNetwork(nn.Module):
     def __init__(self, cfg: DictConfig):
         super(ScoreNetwork, self).__init__()
 
-        self.latent_dim = cfg.latent_dim
+        # self.latent_dim = cfg.latent_dim
         self.input_dim = cfg.input_dim
+        self.embed_data_dim = cfg.embed_data_dim
         self.model_dim = cfg.model_dim
         self.n_layers = cfg.n_layers
         self.final_layers = cfg.final_layers
-
         
         self.cond_classes = cfg.cond_classes
         self.extra_null_cond_embedding = cfg.extra_null_cond_embedding
@@ -69,23 +69,24 @@ class ScoreNetwork(nn.Module):
 
         print(f'Dropout is {self.dropout}')
 
-        if self.extra_null_cond_embedding:
-            self.cond_embedding = nn.Embedding(self.cond_classes + 1, self.model_dim)
-            self.null_cond_idx = self.cond_classes
-        else:
-            self.cond_embedding = nn.Embedding(self.cond_classes, self.model_dim)
-            self.null_cond_idx = 0
+        # if self.extra_null_cond_embedding:
+        self.cond_embedding = nn.Embedding(self.cond_classes + 1, self.model_dim)
+        self.null_cond_idx = self.cond_classes
+        # else:
+        #     self.cond_embedding = nn.Embedding(self.cond_classes, self.model_dim)
+        #     self.null_cond_idx = 0
         
-        self.embed_code_and_t = nn.Linear(self.latent_dim + (2 * self.model_dim), self.model_dim)
-        self.ffn = FeedForward(input_dim=self.model_dim, model_dim=self.model_dim, n_layers=self.n_layers, final_layers=self.final_layers, output_dim=self.latent_dim)
+        self.embed_data = nn.Linear(self.input_dim, self.embed_data_dim)
+        self.x_y_t_embed = nn.Linear(self.embed_data_dim + (2 * self.model_dim), self.model_dim)
+        self.ffn = FeedForward(input_dim=self.model_dim, model_dim=self.model_dim, n_layers=self.n_layers, final_layers=self.final_layers, output_dim=self.input_dim)
 
         # transformer_layers = [nn.TransformerEncoderLayer(d_model=self.model_dim, 
         #                                                 nhead=self.nhead, 
         #                                                 dim_feedforward=self.dim_feedforward, 
         #                                                 dropout=self.dropout) 
         #                     for _ in range(self.n_layers)]
-        # self.model = nn.ModuleList([self.embed_code_and_t, *transformer_layers, self.ffn])
-        self.model = nn.ModuleList([self.embed_code_and_t, self.ffn])
+        # self.model = nn.ModuleList([self.x_y_t_embed, *transformer_layers, self.ffn])
+        self.model = nn.ModuleList([self.x_y_t_embed, self.ffn])
 
         self.timestep_embedder = fn.partial(
             get_timestep_embedding,
@@ -98,8 +99,9 @@ class ScoreNetwork(nn.Module):
         B, C = x.shape
         t_embed = torch.tile(self.timestep_embedder(torch.tensor([t]).to(device)), dims=[B, 1])
         y_embed = self.cond_embedding(y).to(device)
-        x = torch.cat([x, t_embed, y_embed], dim=-1).to(device)
+        x_embed = self.embed_data(x).to(device)
+        hidden = torch.cat([x_embed, t_embed, y_embed], dim=-1).to(device)
         for module in self.model[:-1]:  # iterate over all modules except the last one
-            x = module(x)
-        x = self.model[-1](x.squeeze(0))  # pass through the last module (FeedForward)
-        return x
+            hidden = module(hidden)
+        hidden = self.model[-1](hidden.squeeze(0))  # pass through the last module (FeedForward)
+        return hidden

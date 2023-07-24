@@ -1,0 +1,20 @@
+defaults:
+  - base
+
+AE_PATH: null
+LATENT_DIM: 1000
+COND_CLASSES: 189
+VAL_SIZE: 0.0
+DEVICES: 1
+
+score_network:
+  # latent_dim: ${LATENT_DIM}
+  cond_classes: ${COND_CLASSES}
+  input_dim: 1000
+  embed_data_dim: 512
+  model_dim: 256
+  n_layers: 4
+  final_layers: 512
+
+trainer:
+  strategy: auto

@@ -126,6 +126,34 @@ class LatentDiffuser:
         else:
             raise ValueError(f'Unrecognized scaling {self._score_scaling}')
 
+    def ode(self,
+            *,
+            x_t: np.ndarray,
+            score_t: np.ndarray,
+            t: float,
+            dt: float,
+            mask: np.ndarray=None,
+            noise_scale: float=1.0,
+        ):
+        if not np.isscalar(t):
+            raise ValueError(f'{t} must be a scalar.')
+        x_t = self._scale(x_t)
+        g_t = self.diffusion_coef(t)
+        f_t = self.drift_coef(x_t, t)
+
+        # Probability flow ODE
+        perturb = (f_t - (1/2)*(g_t**2) * score_t) * dt
+        
+        if mask is not None:
+            perturb *= mask[..., None]
+        else:
+            mask = np.ones(x_t.shape[:-1])
+        
+        # For positive dt, we add dx and vv.
+        x_t_1 = x_t + perturb
+        x_t_1 = self._unscale(x_t_1)
+        return x_t_1
+
     def reverse(
             self,
             *,
