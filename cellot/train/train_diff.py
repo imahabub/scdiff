@@ -4,7 +4,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
-from cellot.models.cond_score_module import CondScoreModule
+from cellot.models.cond_score_module import CondScoreModule, Pred_X_0_Parameterization
 from cellot.data.sciplex_ae_dm import CellDataModule
 from cellot.train.utils import get_free_gpu
 import os
@@ -16,14 +16,29 @@ def main(cfg: DictConfig) -> None:
     
     # Train model
     train_model(cfg, data_module)
-
-def train_model(cfg: DictConfig, data_module: CellDataModule):
+    
+    
+def init_model(cfg):
+    
+    if cfg.MODEL_CLASS == 'CondScoreModule':
+        model_class = CondScoreModule
+    elif cfg.MODEL_CLASS == 'Pred_X_0_Parameterization':
+        model_class = Pred_X_0_Parameterization
+    else:
+        raise ValueError(f'Unknown model class {cfg.MODEL_CLASS}')
+    
     # Load or initialize the model
     if cfg.WARM_START:
-        model = CondScoreModule.load_from_checkpoint(checkpoint_path=cfg.WARM_START_PATH, hparams=cfg)
+        model = model_class.load_from_checkpoint(checkpoint_path=cfg.WARM_START_PATH, hparams=cfg)
         cfg.experiment.wandb_logger.name = cfg.experiment.wandb_logger.name + '_WS'
     else:
-        model = CondScoreModule(cfg)
+        model = model_class(cfg)
+    
+    return model
+
+def train_model(cfg: DictConfig, data_module: CellDataModule):
+    
+    model = init_model(cfg)
 
     # Define device strategy
     if cfg.trainer.strategy == 'auto':

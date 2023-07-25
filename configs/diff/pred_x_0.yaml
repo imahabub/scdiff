@@ -1,0 +1,27 @@
+defaults:
+  - base
+
+MODEL_CLASS: Pred_X_0_Parameterization
+AE_PATH: null
+LATENT_DIM: 1000
+COND_CLASSES: 189
+VAL_SIZE: 0.1
+DEVICES: 1
+TARGET: all
+
+score_network:
+  # latent_dim: ${LATENT_DIM}
+  cond_classes: ${COND_CLASSES}
+  input_dim: 1000
+  embed_data_dim: 512
+  model_dim: 256
+  n_layers: 4
+  final_layers: 512
+
+dataloader:
+  batch_size: 8192 
+  num_workers: 64
+
+trainer:
+  strategy: auto
+  log_every_n_steps: 100

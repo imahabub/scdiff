@@ -49,14 +49,16 @@ class LatentDiffuser:
     def sample_ref(self, n_samples: float=1):
         return np.random.normal(size=(n_samples, self.latent_dim))
 
-    def marginal_b_t(self, t):
-        if self.schedule == 'linear':
-            return t*self.min_b + (1/2)*(t**2)*(self.max_b-self.min_b)
-        elif self.schedule == 'exponential': 
-            return (self.max_b**t * self.min_b**(1-t) - self.min_b) / (
-                np.log(self.max_b) - np.log(self.min_b))
-        else:
-            raise ValueError(f'Unknown schedule {self.schedule}')
+    def marginal_b_t(self, t, use_torch=False, device='cpu'):
+        def inner():
+            if self.schedule == 'linear':
+                return t*self.min_b + (1/2)*(t**2)*(self.max_b-self.min_b)
+            elif self.schedule == 'exponential': 
+                return (self.max_b**t * self.min_b**(1-t) - self.min_b) / (
+                    np.log(self.max_b) - np.log(self.min_b))
+            else:
+                raise ValueError(f'Unknown schedule {self.schedule}')
+        return inner() if not use_torch else torch.tensor(inner()).to(device)
 
     def calc_trans_0(self, score_t, x_t, t, use_torch=True):
         beta_t = self.marginal_b_t(t)
@@ -209,7 +211,7 @@ class LatentDiffuser:
 
         """
         if use_torch:
-            return 1 - torch.exp(-self.marginal_b_t(t))
+            return 1 - torch.exp(-self.marginal_b_t(t, use_torch=use_torch))
         return 1 - np.exp(-self.marginal_b_t(t))
 
     def score(self, x_t, x_0, t, use_torch=False, scale=False):
@@ -220,4 +222,9 @@ class LatentDiffuser:
         if scale:
             x_t = self._scale(x_t)
             x_0 = self._scale(x_0)
-        return -(x_t - exp_fn(-1/2*self.marginal_b_t(t)) * x_0) / self.conditional_var(t, use_torch=use_torch)
+        
+        if use_torch:
+            device = x_t.device
+            return -(x_t - exp_fn(-1/2*self.marginal_b_t(t, use_torch=True).to(device)) * x_0) / self.conditional_var(t, use_torch=True)
+        else:
+            return -(x_t - exp_fn(-1/2*self.marginal_b_t(t)) * x_0) / self.conditional_var(t)
