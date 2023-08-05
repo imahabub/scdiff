@@ -6,7 +6,7 @@ import numpy as np
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from cellot.models.cond_score_module import CondScoreModule, CondScoreModuleV2
-from cellot.data.sciplex_ae_dm import CellDataModule
+from cellot.data.datamodules import CellDataModule
 from cellot.data.utils import load_ae_cell_data, load_ae, cast_dataset_to_loader
 from cellot.train.utils import get_free_gpu
 from cellot.utils.dev_utils import compute_mmd_loss, get_ckpt_path_from_artifact_id, get_target_cond_idx

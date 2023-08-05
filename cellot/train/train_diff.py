@@ -5,14 +5,19 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from cellot.models.cond_score_module import CondScoreModule, Pred_X_0_Parameterization
-from cellot.data.sciplex_ae_dm import CellDataModule
+from cellot.data.datamodules import GenericDataModule, CellDataModule, scPerturbDataModule
 from cellot.train.utils import get_free_gpu
 import os
 
 @hydra.main(config_path="../../configs/diff", config_name="base.yaml")
 def main(cfg: DictConfig) -> None:
     # Prepare data
-    data_module = CellDataModule(cfg)
+    if cfg.data.type == 'cell':
+        data_module = CellDataModule(cfg)
+    elif cfg.data.type == 'scPerturb':
+        data_module = scPerturbDataModule(cfg)
+    else:
+        raise ValueError(f'Unknown data type {cfg.data.type}')
     
     # Train model
     train_model(cfg, data_module)
@@ -36,7 +41,7 @@ def init_model(cfg):
     
     return model
 
-def train_model(cfg: DictConfig, data_module: CellDataModule):
+def train_model(cfg: DictConfig, data_module: GenericDataModule):
     
     model = init_model(cfg)
 

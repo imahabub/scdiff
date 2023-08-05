@@ -20,22 +20,38 @@ logger.setLevel(logging.INFO)
 
 class AnnDataDataset(Dataset):
     def __init__(
-        self, adata, obs=None, categories=None, include_index=False, dim_red=None
+        self, adata, obs=None, categories=None, include_index=False, dim_red=None, pca=False,
     ):
         self.adata = adata
         self.adata.X = self.adata.X.astype(np.float32)
         self.obs = obs
         self.categories = categories
         self.include_index = include_index
+        self.pca = pca
 
     def __len__(self):
         return len(self.adata)
 
     def __getitem__(self, idx):
-        value = self.adata.X[idx]
+        if self.pca:
+            value = self.adata.obsm['X_pca'][idx]
+        else:
+            value = self.adata.X[idx]
+        
+        if isinstance(value, sparse.csc_matrix):
+            value = value.toarray()
+            
+        assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
+        
+        if len(value.shape) > 1:
+            value = value.squeeze()
 
         if self.obs is not None:
-            meta = self.categories.index(self.adata.obs[self.obs].iloc[idx])
+            category_value = self.adata.obs[self.obs].iloc[idx]
+            if pd.isna(category_value):
+                return value, len(self.categories) + 1 #NOTE: We use +2 because we reserve +1 for the null condition index.
+            
+            meta = self.categories.index(category_value)
             value = value, int(meta)
 
         if self.include_index:

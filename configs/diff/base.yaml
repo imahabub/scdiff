@@ -4,7 +4,8 @@ LATENT_DIM: 50
 COND_CLASSES: 189
 SEED: 42
 AE_PATH: /Mounts/rbg-storage1/users/johnyang/cellot/saved_weights/ae/ae.pt
-VAL_SIZE: 0.1
+VAL_FRACT: 0.1
+TEST_FRACT: 0.1
 DEVICES: 1
 WARM_START: False
 WARM_START_PATH: null

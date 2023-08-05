@@ -1,0 +1,22 @@
+defaults:
+  - pred_x_0
+
+LATENT_DIM: null #deprecated.
+COND_CLASSES: 115 #114 in adata.obs.perturbation, add one for NaNs.
+
+score_network:
+  cond_classes: ${COND_CLASSES}
+  input_dim: 32738
+  embed_data_dim: 512
+  model_dim: 256
+  n_layers: 4
+  final_layers: 128
+
+dataloader:
+  batch_size: 256
+  num_workers: 4
+
+data:
+  type: scPerturb
+  path: /Mounts/rbg-storage1/users/johnyang/cellot/datasets/AdamsonWeissman2016_GSM2406681_10X010.h5ad
+  pca: False
