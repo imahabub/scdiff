@@ -7,7 +7,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from cellot.models.cond_score_module import CondScoreModule, Pred_X_0_Parameterization
 from cellot.data.datamodules import GenericDataModule, CellDataModule, scPerturbDataModule
 from cellot.train.utils import get_free_gpu
-import os
+from utils import get_ckpt_path_from_run_id
+import os, re
 
 @hydra.main(config_path="../../configs/diff", config_name="base.yaml")
 def main(cfg: DictConfig) -> None:
@@ -34,7 +35,8 @@ def init_model(cfg):
     
     # Load or initialize the model
     if cfg.WARM_START:
-        model = model_class.load_from_checkpoint(checkpoint_path=cfg.WARM_START_PATH, hparams=cfg)
+        ckpt_path = get_ckpt_path_from_run_id(cfg.WANDB_RUN_ID)
+        model = model_class.load_from_checkpoint(checkpoint_path=ckpt_path, hparams=cfg)
         cfg.experiment.wandb_logger.name = cfg.experiment.wandb_logger.name + '_WS'
     else:
         model = model_class(cfg)

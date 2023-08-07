@@ -20,3 +20,6 @@ data:
   type: scPerturb
   path: /Mounts/rbg-storage1/users/johnyang/cellot/datasets/AdamsonWeissman2016_GSM2406681_10X010.h5ad
   pca: True
+
+trainer:
+  max_epochs: -1

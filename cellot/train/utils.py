@@ -5,6 +5,18 @@ from cellot.utils.helpers import flat_dict, nest_dict
 import GPUtil
 import os
 
+import wandb
+
+TEAM_NAME = 'protein-optimization'
+PROJECT_NAME = 'sc_diff'
+
+def get_ckpt_path_from_run_id(id):
+    run = wandb.init(project=PROJECT_NAME, entity=TEAM_NAME, resume='must', id=id)
+    artifact = run.use_artifact(f'model-{id}:best')
+    artifact_dir = artifact.download()
+    ckpt_path = f'{artifact_dir}/model.ckpt'
+    return ckpt_path
+
 def check_loss(*args):
     for arg in args:
         if torch.isnan(arg):
