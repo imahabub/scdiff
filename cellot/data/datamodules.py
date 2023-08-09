@@ -94,13 +94,17 @@ class scPerturbDataModule(GenericDataModule):
         
     def prepare_data(self):
         # If your datasets are downloadable you would write code here to download them
-        self.adata = sc.read_h5ad(self.config.data.path)
-        if self.pca:
-            sc.tl.pca(self.adata, svd_solver='arpack')
-        
+        # self.adata = sc.read_h5ad(self.config.data.path)
+        # if self.pca:
+        #     sc.tl.pca(self.adata, svd_solver='arpack')
+        ...
         
     def setup(self, stage='fit'):
         torch.manual_seed(self.seed)
+        
+        self.adata = sc.read_h5ad(self.config.data.path)
+        if self.pca:
+            sc.tl.pca(self.adata, svd_solver='arpack')
         
         condition = 'perturbation'
         self.data = AnnDataDataset(adata=self.adata, obs=condition, categories=sorted(self.adata.obs[condition].cat.categories), pca=self.pca)
