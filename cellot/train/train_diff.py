@@ -10,7 +10,7 @@ from cellot.models.cond_score_module import CondScoreModule, Pred_X_0_Parameteri
 from cellot.data.datamodules import GenericDataModule, CellDataModule, scPerturbDataModule
 from cellot.train.utils import get_free_gpu
 from utils import get_ckpt_path_from_run_id
-import os, re
+import os, re, argparse
 
 def main(cfg: DictConfig) -> None:
     # Prepare data
@@ -69,8 +69,8 @@ def train_model(cfg: DictConfig, data_module: GenericDataModule):
 overrides = [
     "DEBUG=True",
     "trainer.fast_dev_run=True",
-    "trainer.strategy=ddp",
-    "DEVICES=[1, 3, 4, 5, 7]",
+    # "trainer.strategy=ddp",
+    # "DEVICES=[1, 3, 4, 5, 7]",
     "dataloader.num_workers=0",
     "score_network.n_layers=8",
 ]
@@ -80,8 +80,12 @@ if __name__ == "__main__":
     # cs = ConfigStore.instance()
     # cs.store(name="base", node=DictConfig) # Define your config schema here
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ao', nargs='*', default=[])
+    args = parser.parse_args()
+
     # Initialize Hydra
     with hydra.initialize(config_path="../../configs/diff"):
         # Get the config object
-        cfg = compose(config_name="scperturb_pca", overrides=overrides)
+        cfg = compose(config_name="scperturb_pca", overrides=overrides + args.additional_overrides)
         main(cfg)
