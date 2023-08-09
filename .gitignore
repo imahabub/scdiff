@@ -11,6 +11,7 @@ cellot/train/sc_diff/
 cellot/train/artifacts/
 runs/
 outputs/
+wandb/
 
 # mac
 .DS_Store

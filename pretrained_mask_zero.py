@@ -377,12 +377,9 @@ def fixed_bin_collate(batch, vocab, genes, bins):
             gid_batch[i] = index[genes] + extra_tokens
             exp_t = torch.tensor(exp)
             
-            mask_zero = (exp_t == 1)
-            mask_gid_not_in_genes = index[gid_t] == -1
-            mask_ = mask_zero | mask_gid_not_in_genes
-            valid_mask = index[gid_t[mask_]] != -1
-            valid_indices = index[gid_t[mask_]][valid_mask]
-            mask_zero_batch[i, valid_indices] = True
+            genes_in_gid = set([x.item() for x in gid_t[index[gid_t] != -1]])
+            genes_not_in_gid = list(set(genes).difference(genes_in_gid))
+            mask_zero_batch[i, index[genes_not_in_gid]] = True
             
             exp_t = exp_t[index[gid_t] != -1]
             exp_t = torch.log1p(exp_t * med / exp_t.sum())
@@ -568,7 +565,7 @@ model = CellGP(
 #     max_epochs=1,
 # )
 
-wandb_logger = WandbLogger(log_model="all", project="CellGP_Encoder")
+wandb_logger = WandbLogger(log_model="all", project="CellGP_Encoder", name="pretrained_mask_zero")
 cback = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1)
 trainer = pl.Trainer(
     accelerator="gpu",
