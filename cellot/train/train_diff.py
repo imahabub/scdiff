@@ -1,5 +1,7 @@
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import hydra
+from hydra.core.config_store import ConfigStore
+from hydra import compose
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -10,7 +12,6 @@ from cellot.train.utils import get_free_gpu
 from utils import get_ckpt_path_from_run_id
 import os, re
 
-@hydra.main(config_path="../../configs/diff", config_name="base.yaml")
 def main(cfg: DictConfig) -> None:
     # Prepare data
     if cfg.data.type == 'cell':
@@ -65,5 +66,22 @@ def train_model(cfg: DictConfig, data_module: GenericDataModule):
     trainer = Trainer(logger=logger, devices=trainer_devices, **cfg.trainer)
     trainer.fit(model, datamodule=data_module)
 
+overrides = [
+    "DEBUG=True",
+    "trainer.fast_dev_run=True",
+    "trainer.strategy=ddp",
+    "DEVICES=[1, 3, 4, 5, 7]",
+    "dataloader.num_workers=0",
+    "score_network.n_layers=8",
+]
+
 if __name__ == "__main__":
-    main()
+    # Register the config
+    # cs = ConfigStore.instance()
+    # cs.store(name="base", node=DictConfig) # Define your config schema here
+
+    # Initialize Hydra
+    with hydra.initialize(config_path="../../configs/diff"):
+        # Get the config object
+        cfg = compose(config_name="scperturb_pca", overrides=overrides)
+        main(cfg)
