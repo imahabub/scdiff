@@ -66,14 +66,6 @@ def train_model(cfg: DictConfig, data_module: GenericDataModule):
     trainer = Trainer(logger=logger, devices=trainer_devices, **cfg.trainer)
     trainer.fit(model, datamodule=data_module)
 
-overrides = [
-    "DEBUG=True",
-    "trainer.fast_dev_run=True",
-    # "trainer.strategy=ddp",
-    # "DEVICES=[1, 3, 4, 5, 7]",
-    "dataloader.num_workers=0",
-    "score_network.n_layers=8",
-]
 
 if __name__ == "__main__":
     # Register the config
@@ -81,11 +73,12 @@ if __name__ == "__main__":
     # cs.store(name="base", node=DictConfig) # Define your config schema here
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ao', nargs='*', default=[])
+    parser.add_argument('--cn', type=str, default='base', help='Configuration name')
+    parser.add_argument('--ao', nargs='*', default=[], help='Additional overrides')
     args = parser.parse_args()
 
     # Initialize Hydra
     with hydra.initialize(config_path="../../configs/diff"):
         # Get the config object
-        cfg = compose(config_name="scperturb_pca", overrides=overrides + args.additional_overrides)
+        cfg = compose(config_name=args.cn, overrides=args.ao)
         main(cfg)
