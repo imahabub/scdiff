@@ -36,7 +36,7 @@ def init_model(cfg):
     
     # Load or initialize the model
     if cfg.WARM_START:
-        ckpt_path = get_ckpt_path_from_run_id(cfg.WANDB_RUN_ID)
+        ckpt_path = cfg.WARM_START_PATH if cfg.WANDB_RUN_ID is None else get_ckpt_path_from_run_id(cfg.WANDB_RUN_ID)
         model = model_class.load_from_checkpoint(checkpoint_path=ckpt_path, hparams=cfg)
         cfg.experiment.wandb_logger.name = cfg.experiment.wandb_logger.name + '_WS'
     else:

@@ -5,6 +5,10 @@ notebooks/artifacts/
 notebooks/wandb/
 notebooks/lightning_logs/
 notebooks/tb_logs/
+tb_logs/
+wandb/
+cellot/train/sc_diff/
+cellot/train/artifacts/
 runs/
 outputs/
 
