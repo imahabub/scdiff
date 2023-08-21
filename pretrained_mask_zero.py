@@ -492,13 +492,13 @@ class DM(pl.LightningDataModule):
 # %%
 def test_collate():
     vocab = {v: k for k, v in enumerate("abcdefghij")}
-    genes = [1, 2, 5]
+    genes = [1, 2, 3]
     bins = 3
     print(vocab)
    
    
     gid = [2, 3, 4, 5]
-    exp = [0, 1, 0, 1]
+    exp = [1, 1, 1, 1]
     med = 5
     batch = [[gid, exp, med]]
     print(fixed_bin_collate(batch, vocab, genes, bins))
@@ -533,8 +533,8 @@ dm = DM(
 test_collate()
 
 # # %%
-# import os
-# os.environ["WANDB_MODE"] = "dryrun"
+import os
+os.environ["WANDB_MODE"] = "dryrun"
 
 # %%
 
