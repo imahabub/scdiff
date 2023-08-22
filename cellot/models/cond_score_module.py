@@ -11,7 +11,7 @@ class CondScoreModule(pl.LightningModule):
     def __init__(self, hparams: DictConfig):
         super().__init__()
         self.cfg = hparams
-        self.score_network = self.init_network(hparams.score_network) # Initialize your network here
+        self.score_network = None if 'score_network' not in hparams else self.init_network(hparams.score_network) # Initialize your network here
         self.writer = SummaryWriter(log_dir='tb_logs')
         self.diffuser = self.init_diffuser(hparams.diffuser) # Initialize your diffuser here
         self.dt = hparams.diffuser.dt

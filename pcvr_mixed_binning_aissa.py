@@ -32,7 +32,9 @@ import pandas as pd
 
 from cellot.models.cond_score_module import CondScoreModule
 from cellot.models.score_network import get_timestep_embedding
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+from functools import wraps
+
 
 def exists(val):
     return val is not None
@@ -47,6 +49,19 @@ DEFAULT_ENCODING = "utf-8"
 def read_vocab(path):
     with open(path, "r", encoding=DEFAULT_ENCODING) as inf:
         return {gene: i for i, gene in enumerate(json.load(inf))}
+    
+def cache_fn(f):
+    cache = None
+    @wraps(f)
+    def cached_fn(*args, _cache=True, **kwargs):
+        if not _cache:
+            return f(*args, **kwargs)
+        nonlocal cache
+        if cache is not None:
+            return cache
+        cache = f(*args, **kwargs)
+        return cache
+    return cached_fn
 
 
 class PreNorm(nn.Module):
@@ -229,41 +244,97 @@ class Decoder(pl.LightningModule):
         latents = self.decoder_cross_attn(x, context=z)
         latents = latents + self.decoder_ff(latents)
         return self.to_logits(latents)
-
-class PcvrLatentScoreNetwork(torch.nn.Module):
     
-    def __init__(self, cfg: DictConfig):
-        super(PcvrScoreNetwork, self).__init__()
+class PcvrLatentScoreNetwork(nn.Module):
+    def __init__(self, cfg: DictConfig, weight_tie_layers=False):
+        super(PcvrLatentScoreNetwork, self).__init__()
         
-    def forward(self, z, y, t):
-        '''
-        Use perceiver to cross attend bw z and y and t with each block.
-        '''
+        self.embed_dim = cfg.embed_dim
+        self.cond_classes = cfg.cond_classes
+        latent_dim = cfg.latent_dim
+        # dim = cfg.dim
+        cross_heads = cfg.cross_heads
+        cross_dim_head = cfg.cross_dim_head
+        heads = cfg.heads
+        latent_dim_head = cfg.latent_dim_head
+        depth = cfg.depth
         
-        return z
+        self.cond_embedding = nn.Embedding(self.cond_classes + 1, self.embed_dim)
+        self.null_cond_idx = self.cond_classes
+        
+        self.timestep_embedder = partial(
+            get_timestep_embedding,
+            embedding_dim=self.embed_dim,
+        )
 
-    
-    
+        get_cross_attn = lambda: PreNorm(latent_dim, Attention(latent_dim, self.embed_dim, heads=cross_heads, dim_head=cross_dim_head), context_dim=self.embed_dim)
+        get_attn = lambda: PreNorm(latent_dim, Attention(latent_dim, latent_dim, heads=heads, dim_head=latent_dim_head))
+        get_ff = lambda: PreNorm(latent_dim, FeedForward(latent_dim))
+
+        get_cross_attn, get_attn, get_ff = map(cache_fn, (get_cross_attn, get_attn, get_ff))
+
+        self.layers = nn.ModuleList([])
+        cache_args = {'_cache': weight_tie_layers}
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                get_cross_attn(**cache_args),
+                get_attn(**cache_args),
+                get_ff(**cache_args)
+            ]))
+
+    def forward(self, z_t, y, t):
+        '''
+        Cross attend between z_t and y plus t.
+        Attend bw z_t and z_t.
+        Feedforward.
+        
+        - z_t: latent state noised to time t
+        - y: condition tensor
+        - t: time scalar
+        '''
+        device = z_t.device
+        y_plus_t = self.cond_embedding(y) + self.timestep_embedder(torch.tensor([t]).to(device))
+        hidden = z_t
+        for cross_attn, attn, ff in self.layers:
+            hidden = cross_attn(hidden, context=y_plus_t) + hidden
+            hidden = attn(hidden) + hidden
+            hidden = ff(hidden) + hidden
+        return hidden
+
 class PcvrLatentScoreModule(CondScoreModule):  
     
     def __init__(self, hparams: DictConfig, cellgp):
         super().__init__(hparams)
-        self.encoder = cellgp.encoder #TODO: Freeze encoder params
+        self.score_network = PcvrLatentScoreNetwork(hparams.latent_pcvr_score_network)
+        self.encoder = cellgp.encoder
         
-        self.score_network = PcvrScoreNetwork(hparams)
+        # Freeze encoder parameters
+        for param in self.encoder.parameters():
+            param.requires_grad = False
         
-
+        self.mask_ignore_token_ids = hparams.mask_ignore_token_ids
+        
     def _mask_with_tokens(self, t, token_ids):
         init_no_mask = torch.full_like(t, False, dtype=torch.bool)
         mask = reduce(lambda acc, el: acc | (t == el), token_ids, init_no_mask)
         return mask
-        
-    def training_step(self, batch, batch_idx):
+    
+    
+    def forward(self, z_t_y, t):
+        z_t, y = z_t_y #NOTE: legacy score_network takes (x_t, y), t
+        return self.score_network(z_t, y, t)
+    
+    def encode(self, batch):
         gid, equal_width_bins, equal_area_bins, y = batch #TODO:
         
         no_mask = self._mask_with_tokens(gid, self.mask_ignore_token_ids)
         pad_mask = ~no_mask
         x_emb, z = self.encoder(gid, equal_width_bins, equal_area_bins, pad_mask)
+        return x_emb, z, y
+        
+    def training_step(self, batch, batch_idx):
+        x_emb, z, y = self.encode(batch)
         
         t = np.random.uniform(self.min_t, 1.0)
 
@@ -278,23 +349,32 @@ class PcvrLatentScoreModule(CondScoreModule):
             null_cond = torch.ones_like(y) * self.score_network.null_cond_idx
             pred_z_0 = self((torch.tensor(z_t).float().to(self.device), null_cond.to(self.device)), t)
             
-            
-        #Replace with MSE Loss.
-        
-        loss = torch.mean((z_t - pred_z_0)**2)
-            
-        # x_t_torch = torch.tensor(x_t).float().to(self.device)
-        # pred_score_t = self.diffuser.score(x_t=x_t_torch, x_0=pred_x_0, t=t, use_torch=True)
-
-        # score_mse = (gt_score_t - pred_score_t)**2
-        # score_loss = torch.sum(
-        #     score_mse / score_scaling[None, None]**2,
-        #     dim=(-1, -2)
-        # ) 
-
-        # self.log('train/score_mse_loss', loss.item())
-        self.log('train/x_0_mse', torch.mean((x - pred_x_0) ** 2).item())
+        loss = torch.mean((torch.tensor(z_t).to(self.device) - pred_z_0)**2)
+        self.log('train/x_0_mse_loss', loss.item())
         return loss
+    
+    def validation_step(self, batch, batch_idx):
+        x_emb, z, y = self.encode(batch)
+        
+        x_t_fwd = z
+        for fwd_t in np.arange(0 + self.dt, 1.0, self.dt):
+            x_t_fwd = torch.tensor(x_t_fwd).float().to(self.device)
+            pred_x_0 = self((x_t_fwd, y), fwd_t)
+            fwd_cond_score = self.diffuser.score(x_t=x_t_fwd, x_0=pred_x_0, t=fwd_t, use_torch=True)
+            x_t_fwd = self.forward_ODE_step(x_t_fwd, fwd_cond_score, fwd_t, self.dt)
+        
+        x_t_rvs = x_t_fwd
+        for rvs_t in np.arange(1.0, 0, -self.dt):
+            x_t_rvs = torch.tensor(x_t_rvs).float().to(self.device)
+            pred_x_0 = self((x_t_rvs, y), rvs_t)
+            rvs_cond_score = self.diffuser.score(x_t=x_t_rvs, x_0=pred_x_0, t=rvs_t, use_torch=True)
+            x_t_rvs = self.reverse_ODE_step(x_t_rvs, rvs_cond_score, rvs_t, self.dt)
+        
+        z_0 = torch.tensor(x_t_rvs).to(self.device)
+
+        mse = torch.mean((z - z_0) ** 2)
+        self.log('val/mse', mse.item())
+        return mse
 
 class CellGP(pl.LightningModule):
     def __init__(
@@ -660,6 +740,38 @@ class AissaDM(DM):
         )
 
 if __name__ == "__main__":
+    
+    yaml_string = """
+    latent_pcvr_score_network:
+        base: False
+        embed_dim: 64
+        cond_classes: 4  #shouldn't be any NaNs to account for.
+        latent_dim: 256   # Example value
+        cross_heads: 4    # Example value
+        cross_dim_head: 32 # Example value
+        heads: 4          # Example value
+        latent_dim_head: 32 # Example value
+        depth: 6          # Example value for depth of the network
+
+    mask_ignore_token_ids: 
+        - 0
+
+    diffuser: #TODO: Check if diffuser works for 2d input 
+        min_b: 0.01
+        max_b: 1.0
+        schedule: exponential
+        score_scaling: var
+        coordinate_scaling: 1.0
+        latent_dim: ${latent_pcvr_score_network.latent_dim}
+        dt: 0.01
+        min_t: 0
+        
+    experiment:
+        lr: 1e-4
+    """
+    
+    cfg = OmegaConf.create(yaml_string)
+    
     original_vocab = read_vocab("/data/rsg/nlp/ujp/cellgp/vocab.json")
     with open("/data/rsg/nlp/ujp/cellgp/run_encoder/ccle_vocab_genes.json", "r") as inf:
         ccle_vocab_genes = sorted(json.load(inf))
@@ -669,8 +781,11 @@ if __name__ == "__main__":
 
     # test_collate()
     extra_tokens = 2
+    
+    cell_gp_checkpoint_path = '/data/rsg/nlp/ujp/cellgp/cellgp/models/perceiverio/CellGP_Encoder/lo8jpygf/checkpoints/epoch=2-step=83589.ckpt'
 
-    model = CellGP(
+    cellgp = CellGP.load_from_checkpoint(
+        cell_gp_checkpoint_path,
         nbins=BINS,
         max_len=len(ccle_vocab_genes),
         genes=ccle_vocab_genes,
@@ -693,12 +808,12 @@ if __name__ == "__main__":
         weight_tie_layers=False,
         seq_dropout_prob=0.1,
     )
+    
+    lm = PcvrLatentScoreModule(cfg, cellgp) #TODO:
 
     to_ensg_path = '/data/rsg/nlp/ujp/cellgp/datasets/nano_hugo_to_ensg.pkl'
     with open(to_ensg_path, 'rb') as f:
         to_ensg = pickle.load(f)
-
-    # tokenizer.add_tokens(original_vocab)
 
     dm = AissaDM(
         "/Mounts/rbg-storage1/users/johnyang/cellot/datasets/AissaBenevolenskaya2021.h5ad",
@@ -721,17 +836,10 @@ if __name__ == "__main__":
         symbol_to_ensg_dict=to_ensg,
         count_threshold=50,
     )
-    # trainer = pl.Trainer(
-    #     accelerator="cpu",
-    #     precision=32,
-    #     max_epochs=1,
-    # )
-    
     import os
     os.environ["WANDB_MODE"] = "dryrun" 
 
-
-    wandb_logger = WandbLogger(log_model="all", project="CellGP_Encoder")
+    wandb_logger = WandbLogger(log_model="all", project="scdiff")
     cback = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1)
     trainer = pl.Trainer(
         accelerator="gpu",
@@ -743,4 +851,4 @@ if __name__ == "__main__":
         callbacks=[cback],
         fast_dev_run=True, #TODO: Remove this
     )
-    trainer.fit(model, dm)
+    trainer.fit(lm, dm)
