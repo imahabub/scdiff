@@ -364,7 +364,7 @@ class PcvrLatentScoreModule(CondScoreModule):
             
         if self.loss_type == 'MSE':
             loss = torch.mean((z_0 - pred_z_0)**2)
-            self.log('train/x_0_mse', loss.item())
+            self.log('train/x_0_mse', loss.item(), sync_dist=True)
         elif self.loss_type == 'pred_x_0_sm':
             score_scaling = torch.tensor(self.diffuser.score_scaling(t)).to(self.device)
             gt_score_t = torch.tensor(gt_score_t).to(self.device)
@@ -376,7 +376,7 @@ class PcvrLatentScoreModule(CondScoreModule):
                 dim=(-1, -2)
             )
             loss = torch.mean(loss)
-            self.log('train/score_mse_loss', loss.item())
+            self.log('train/score_mse_loss', loss.item(), sync_dist=True)
         else:
             raise ValueError(f'Unknown loss type {self.loss_type}')
         
@@ -404,7 +404,7 @@ class PcvrLatentScoreModule(CondScoreModule):
         z_0 = torch.tensor(x_t_rvs).to(self.device)
 
         mse = torch.mean((z - z_0) ** 2)
-        self.log('val/mse', mse.item())
+        self.log('val/mse', mse.item(), sync_dist=True)
         return mse
 
 class CellGP(pl.LightningModule):
