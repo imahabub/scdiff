@@ -259,6 +259,7 @@ class PcvrLatentScoreNetwork(nn.Module):
         heads = cfg.heads
         latent_dim_head = cfg.latent_dim_head
         depth = cfg.depth
+        self.use_hidden_attn = cfg.use_hidden_attn
         
         self.cond_embedding = nn.Embedding(self.cond_classes + 1, self.embed_dim)
         self.null_cond_idx = self.cond_classes
@@ -277,12 +278,19 @@ class PcvrLatentScoreNetwork(nn.Module):
         self.layers = nn.ModuleList([])
         cache_args = {'_cache': weight_tie_layers}
 
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                get_cross_attn(**cache_args),
-                get_attn(**cache_args),
-                get_ff(**cache_args)
-            ]))
+        if self.use_hidden_attn:
+            for _ in range(depth):
+                self.layers.append(nn.ModuleList([
+                    get_cross_attn(**cache_args),
+                    get_attn(**cache_args),
+                    get_ff(**cache_args)
+                ]))
+        else:
+            for _ in range(depth):
+                self.layers.append(nn.ModuleList([
+                    get_cross_attn(**cache_args),
+                    get_ff(**cache_args)
+                ]))
 
     def forward(self, z_t, y, t):
         '''
@@ -297,10 +305,15 @@ class PcvrLatentScoreNetwork(nn.Module):
         device = z_t.device
         y_plus_t = self.cond_embedding(y) + self.timestep_embedder(torch.tensor([t]).to(device)) #NOTE: [B, N, K] + [B, K] => [B, N, K]
         hidden = z_t
-        for cross_attn, attn, ff in self.layers:
-            hidden = cross_attn(hidden, context=y_plus_t) + hidden
-            hidden = attn(hidden) + hidden
-            hidden = ff(hidden) + hidden
+        if self.use_hidden_attn:
+            for cross_attn, attn, ff in self.layers:
+                hidden = cross_attn(hidden, context=y_plus_t) + hidden
+                hidden = attn(hidden) + hidden
+                hidden = ff(hidden) + hidden
+        else:
+            for cross_attn, ff in self.layers:
+                hidden = cross_attn(hidden, context=y_plus_t) + hidden
+                hidden = ff(hidden) + hidden
         return hidden
 
 class PcvrLatentScoreModule(CondScoreModule):  
@@ -773,6 +786,7 @@ def main(args):
             "latent_dim_head": args.latent_dim_head,
             "depth": args.depth,
             "loss_type": args.loss_type,
+            "use_hidden_attn": args.use_hidden_attn,
         },
         "mask_ignore_token_ids": [0],
         "diffuser": {
@@ -883,6 +897,7 @@ if __name__ == "__main__":
     # Configuration arguments
     parser.add_argument('--devices', type=str, required=True, help='Comma-separated list of devices')
     parser.add_argument('--name', type=str, required=True, help='Name of experiment.')
+    parser.add_argument('--use_hidden_attn', type=bool, default=True, help='Whether to use hidden attention in the latent score network.')
     parser.add_argument('--base', type=bool, default=False, help='Base configuration value.')
     parser.add_argument('--embed_dim', type=int, default=64, help='Embedding dimension.')
     parser.add_argument('--cond_classes', type=int, default=4, help='Number of condition classes.')
