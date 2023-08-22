@@ -14,6 +14,7 @@ from perceiver_pytorch import PerceiverIO
 from torch import nn, einsum
 import json
 import glob
+import argparse
 
 # from cellgp.datasets import read_vocab
 # from cellgp.tokenizer import Tokenizer
@@ -294,7 +295,7 @@ class PcvrLatentScoreNetwork(nn.Module):
         - t: time scalar
         '''
         device = z_t.device
-        y_plus_t = self.cond_embedding(y) + self.timestep_embedder(torch.tensor([t]).to(device))
+        y_plus_t = self.cond_embedding(y) + self.timestep_embedder(torch.tensor([t]).to(device)) #NOTE: [B, N, K] + [B, K] => [B, N, K]
         hidden = z_t
         for cross_attn, attn, ff in self.layers:
             hidden = cross_attn(hidden, context=y_plus_t) + hidden
@@ -308,25 +309,26 @@ class PcvrLatentScoreModule(CondScoreModule):
         super().__init__(hparams)
         self.score_network = PcvrLatentScoreNetwork(hparams.latent_pcvr_score_network)
         self.encoder = cellgp.encoder
-        
+
         # Freeze encoder parameters
         for param in self.encoder.parameters():
             param.requires_grad = False
-        
+                
         self.mask_ignore_token_ids = hparams.mask_ignore_token_ids
+        self.loss_type = hparams.latent_pcvr_score_network.loss_type
         
     def _mask_with_tokens(self, t, token_ids):
         init_no_mask = torch.full_like(t, False, dtype=torch.bool)
         mask = reduce(lambda acc, el: acc | (t == el), token_ids, init_no_mask)
         return mask
     
-    
     def forward(self, z_t_y, t):
         z_t, y = z_t_y #NOTE: legacy score_network takes (x_t, y), t
         return self.score_network(z_t, y, t)
     
     def encode(self, batch):
-        gid, equal_width_bins, equal_area_bins, y = batch #TODO:
+        self.encoder.eval()
+        gid, equal_width_bins, equal_area_bins, y = batch
         
         no_mask = self._mask_with_tokens(gid, self.mask_ignore_token_ids)
         pad_mask = ~no_mask
@@ -336,12 +338,10 @@ class PcvrLatentScoreModule(CondScoreModule):
     def training_step(self, batch, batch_idx):
         x_emb, z, y = self.encode(batch)
         
-        t = np.random.uniform(self.min_t, 1.0)
+        z_0 = z
+        t = np.random.uniform(self.min_t, 1.0) 
 
         z_t, gt_score_t = self.diffuser.forward_marginal(z.detach().cpu().numpy(), t=t)
-
-        score_scaling = torch.tensor(self.diffuser.score_scaling(t)).to(self.device)
-        gt_score_t = torch.tensor(gt_score_t).to(self.device)
 
         if np.random.random() > 0.5:
             pred_z_0 = self((torch.tensor(z_t).float().to(self.device), y.to(self.device)), t)
@@ -349,21 +349,39 @@ class PcvrLatentScoreModule(CondScoreModule):
             null_cond = torch.ones_like(y) * self.score_network.null_cond_idx
             pred_z_0 = self((torch.tensor(z_t).float().to(self.device), null_cond.to(self.device)), t)
             
-        loss = torch.mean((torch.tensor(z_t).to(self.device) - pred_z_0)**2)
-        self.log('train/x_0_mse_loss', loss.item())
+        if self.loss_type == 'MSE':
+            loss = torch.mean((z_0 - pred_z_0)**2)
+            self.log('train/x_0_mse', loss.item())
+        elif self.loss_type == 'pred_x_0_sm':
+            score_scaling = torch.tensor(self.diffuser.score_scaling(t)).to(self.device)
+            gt_score_t = torch.tensor(gt_score_t).to(self.device)
+            z_t = torch.tensor(z_t).float().to(self.device)
+            pred_score_t = self.diffuser.score(x_t=z_t, x_0=pred_z_0, t=t, use_torch=True)
+            score_mse = (gt_score_t - pred_score_t)**2
+            loss = torch.sum(
+                score_mse / score_scaling[None, None]**2,
+                dim=(-1, -2)
+            )
+            loss = torch.mean(loss)
+            self.log('train/score_mse_loss', loss.item())
+        else:
+            raise ValueError(f'Unknown loss type {self.loss_type}')
+        
         return loss
     
     def validation_step(self, batch, batch_idx):
         x_emb, z, y = self.encode(batch)
         
-        x_t_fwd = z
-        for fwd_t in np.arange(0 + self.dt, 1.0, self.dt):
-            x_t_fwd = torch.tensor(x_t_fwd).float().to(self.device)
-            pred_x_0 = self((x_t_fwd, y), fwd_t)
-            fwd_cond_score = self.diffuser.score(x_t=x_t_fwd, x_0=pred_x_0, t=fwd_t, use_torch=True)
-            x_t_fwd = self.forward_ODE_step(x_t_fwd, fwd_cond_score, fwd_t, self.dt)
+        # x_t_fwd = z
+        # for fwd_t in np.arange(0 + self.dt, 1.0, self.dt):
+        #     x_t_fwd = torch.tensor(x_t_fwd).float().to(self.device)
+        #     pred_x_0 = self((x_t_fwd, y), fwd_t)
+        #     fwd_cond_score = self.diffuser.score(x_t=x_t_fwd, x_0=pred_x_0, t=fwd_t, use_torch=True)
+        #     x_t_fwd = self.forward_ODE_step(x_t_fwd, fwd_cond_score, fwd_t, self.dt)
+    
+        x_t_rvs = np.random.normal(size=z.shape) 
+        #NOTE: Take Peter's suggestion abt checking whether the prior aligns with the noised distribution into account.
         
-        x_t_rvs = x_t_fwd
         for rvs_t in np.arange(1.0, 0, -self.dt):
             x_t_rvs = torch.tensor(x_t_rvs).float().to(self.device)
             pred_x_0 = self((x_t_rvs, y), rvs_t)
@@ -635,6 +653,10 @@ class PcvrAnnDataDataset(Dataset):
     def __getitem__(self, idx):
         '''
         Returns a tuple of (gid, counts, median, condition) for Pcvr model.
+        - gid: integer array of gene_ids that have non-zero count values from original vocab dict
+        - counts: raw non-zero count data from adata.X
+        - median: median of counts across all cells
+        - condition: integer representing the condition of the cell
         '''
         
         if self.pca:
@@ -649,9 +671,7 @@ class PcvrAnnDataDataset(Dataset):
         
         if len(X.shape) > 1:
             X = X.squeeze()
-            
-        # value = self.gid, X, self.med
-        
+                    
         non_zero_gid = self.gid[X > 0]
         non_zero_X = X[X > 0]
 
@@ -738,45 +758,46 @@ class AissaDM(DM):
             self.dset,
             [self.train_percentage, self.val_percentage, self.test_percentage],
         )
-
-if __name__ == "__main__":
     
-    yaml_string = """
-    latent_pcvr_score_network:
-        base: False
-        embed_dim: 64
-        cond_classes: 4  #shouldn't be any NaNs to account for.
-        latent_dim: 256   # Example value
-        cross_heads: 4    # Example value
-        cross_dim_head: 32 # Example value
-        heads: 4          # Example value
-        latent_dim_head: 32 # Example value
-        depth: 6          # Example value for depth of the network
-
-    mask_ignore_token_ids: 
-        - 0
-
-    diffuser: #TODO: Check if diffuser works for 2d input 
-        min_b: 0.01
-        max_b: 1.0
-        schedule: exponential
-        score_scaling: var
-        coordinate_scaling: 1.0
-        latent_dim: ${latent_pcvr_score_network.latent_dim}
-        dt: 0.01
-        min_t: 0
-        
-    experiment:
-        lr: 1e-4
-    """
+def main(args):
+    # Configuration
+    cfg = {
+        "latent_pcvr_score_network": {
+            "base": args.base,
+            "embed_dim": args.embed_dim,
+            "cond_classes": args.cond_classes,
+            "latent_dim": args.latent_dim,
+            "cross_heads": args.cross_heads,
+            "cross_dim_head": args.cross_dim_head,
+            "heads": args.heads,
+            "latent_dim_head": args.latent_dim_head,
+            "depth": args.depth,
+            "loss_type": args.loss_type,
+        },
+        "mask_ignore_token_ids": [0],
+        "diffuser": {
+            "min_b": 0.01,
+            "max_b": 1.0,
+            "schedule": "exponential",
+            "score_scaling": "var",
+            "coordinate_scaling": 1.0,
+            "latent_dim": args.latent_dim,
+            "dt": 0.01,
+            "min_t": 0
+        },
+        "experiment": {
+            "lr": 1e-4
+        }
+    }
+    cfg = OmegaConf.create(cfg)
     
-    cfg = OmegaConf.create(yaml_string)
+    devices = [int(device) for device in args.devices.split(',')]
     
     original_vocab = read_vocab("/data/rsg/nlp/ujp/cellgp/vocab.json")
     with open("/data/rsg/nlp/ujp/cellgp/run_encoder/ccle_vocab_genes.json", "r") as inf:
         ccle_vocab_genes = sorted(json.load(inf))
     BINS = 64
-    tokenizer = Tokenizer()
+    # tokenizer = Tokenizer()
     extra_tokens = 2
 
     # test_collate()
@@ -786,6 +807,7 @@ if __name__ == "__main__":
 
     cellgp = CellGP.load_from_checkpoint(
         cell_gp_checkpoint_path,
+        map_location='cpu',
         nbins=BINS,
         max_len=len(ccle_vocab_genes),
         genes=ccle_vocab_genes,
@@ -809,7 +831,7 @@ if __name__ == "__main__":
         seq_dropout_prob=0.1,
     )
     
-    lm = PcvrLatentScoreModule(cfg, cellgp) #TODO:
+    lm = PcvrLatentScoreModule(cfg, cellgp)
 
     to_ensg_path = '/data/rsg/nlp/ujp/cellgp/datasets/nano_hugo_to_ensg.pkl'
     with open(to_ensg_path, 'rb') as f:
@@ -823,8 +845,8 @@ if __name__ == "__main__":
         train_percentage=0.85,
         val_percentage=0.10,
         test_percentage=0.05,
-        batch_size=48,
-        num_workers=1, #TODO: Change this
+        batch_size=48, 
+        num_workers=64, 
         timeout=10,
         collate_fn=partial(
             fixed_bin_collate,
@@ -836,19 +858,41 @@ if __name__ == "__main__":
         symbol_to_ensg_dict=to_ensg,
         count_threshold=50,
     )
-    import os
-    os.environ["WANDB_MODE"] = "dryrun" 
+    # import os
+    # os.environ["WANDB_MODE"] = "dryrun" 
 
-    wandb_logger = WandbLogger(log_model="all", project="scdiff")
-    cback = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1)
+    wandb_logger = WandbLogger(log_model="all", project="sc_diff", name=args.name)
+    cback = ModelCheckpoint(monitor="val/mse", mode="min", save_top_k=1)
     trainer = pl.Trainer(
         accelerator="gpu",
-        strategy="ddp_find_unused_parameters_true",
-        devices=[1],
+        strategy="ddp", #_find_unused_parameters_true",
+        devices=devices,
         precision=16,
-        max_epochs=11,
+        max_epochs=-1, #TODO: Change
         logger=wandb_logger,
         callbacks=[cback],
-        fast_dev_run=True, #TODO: Remove this
+        check_val_every_n_epoch=25,
+        # overfit_batches=1, 
+        log_every_n_steps=10, 
+        # fast_dev_run=True, 
     )
     trainer.fit(lm, dm)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    # Configuration arguments
+    parser.add_argument('--devices', type=str, required=True, help='Comma-separated list of devices')
+    parser.add_argument('--name', type=str, required=True, help='Name of experiment.')
+    parser.add_argument('--base', type=bool, default=False, help='Base configuration value.')
+    parser.add_argument('--embed_dim', type=int, default=64, help='Embedding dimension.')
+    parser.add_argument('--cond_classes', type=int, default=4, help='Number of condition classes.')
+    parser.add_argument('--latent_dim', type=int, default=256, help='Latent dimension.')
+    parser.add_argument('--cross_heads', type=int, default=4, help='Number of cross heads.')
+    parser.add_argument('--cross_dim_head', type=int, default=32, help='Cross dimension head.')
+    parser.add_argument('--heads', type=int, default=4, help='Number of heads.')
+    parser.add_argument('--latent_dim_head', type=int, default=32, help='Latent dimension head.')
+    parser.add_argument('--depth', type=int, default=3, help='Depth.')
+    parser.add_argument('--loss_type', type=str, default='MSE', choices=['MSE', 'pred_x_0_sm'], help='Type of loss function.')
+
+    args = parser.parse_args()
+    main(args)
