@@ -15,16 +15,24 @@ from torch import nn, einsum
 import json
 import glob
 
-from cellgp.datasets import read_vocab
-from cellgp.tokenizer import Tokenizer
-from cellgp.utils import equal_area_bins, equal_width_bins
+# from cellgp.datasets import read_vocab
+# from cellgp.tokenizer import Tokenizer
+# from cellgp.utils import equal_area_bins, equal_width_bins
+from tokenizer import Tokenizer
+from utils import equal_area_bins, equal_width_bins
 import h5py as h5
 from functools import partial
 import numpy as np
 
+import pickle
 from torch.utils.data import Dataset
+import scanpy as sc
+from scipy import sparse
+import pandas as pd
 
-
+from cellot.models.cond_score_module import CondScoreModule
+from cellot.models.score_network import get_timestep_embedding
+from omegaconf import DictConfig
 
 def exists(val):
     return val is not None
@@ -32,6 +40,13 @@ def exists(val):
 
 def default(val, d):
     return val if exists(val) else d
+
+
+DEFAULT_ENCODING = "utf-8"
+
+def read_vocab(path):
+    with open(path, "r", encoding=DEFAULT_ENCODING) as inf:
+        return {gene: i for i, gene in enumerate(json.load(inf))}
 
 
 class PreNorm(nn.Module):
@@ -215,6 +230,71 @@ class Decoder(pl.LightningModule):
         latents = latents + self.decoder_ff(latents)
         return self.to_logits(latents)
 
+class PcvrLatentScoreNetwork(torch.nn.Module):
+    
+    def __init__(self, cfg: DictConfig):
+        super(PcvrScoreNetwork, self).__init__()
+        
+    def forward(self, z, y, t):
+        '''
+        Use perceiver to cross attend bw z and y and t with each block.
+        '''
+        
+        return z
+
+    
+    
+class PcvrLatentScoreModule(CondScoreModule):  
+    
+    def __init__(self, hparams: DictConfig, cellgp):
+        super().__init__(hparams)
+        self.encoder = cellgp.encoder #TODO: Freeze encoder params
+        
+        self.score_network = PcvrScoreNetwork(hparams)
+        
+
+    def _mask_with_tokens(self, t, token_ids):
+        init_no_mask = torch.full_like(t, False, dtype=torch.bool)
+        mask = reduce(lambda acc, el: acc | (t == el), token_ids, init_no_mask)
+        return mask
+        
+    def training_step(self, batch, batch_idx):
+        gid, equal_width_bins, equal_area_bins, y = batch #TODO:
+        
+        no_mask = self._mask_with_tokens(gid, self.mask_ignore_token_ids)
+        pad_mask = ~no_mask
+        x_emb, z = self.encoder(gid, equal_width_bins, equal_area_bins, pad_mask)
+        
+        t = np.random.uniform(self.min_t, 1.0)
+
+        z_t, gt_score_t = self.diffuser.forward_marginal(z.detach().cpu().numpy(), t=t)
+
+        score_scaling = torch.tensor(self.diffuser.score_scaling(t)).to(self.device)
+        gt_score_t = torch.tensor(gt_score_t).to(self.device)
+
+        if np.random.random() > 0.5:
+            pred_z_0 = self((torch.tensor(z_t).float().to(self.device), y.to(self.device)), t)
+        else:
+            null_cond = torch.ones_like(y) * self.score_network.null_cond_idx
+            pred_z_0 = self((torch.tensor(z_t).float().to(self.device), null_cond.to(self.device)), t)
+            
+            
+        #Replace with MSE Loss.
+        
+        loss = torch.mean((z_t - pred_z_0)**2)
+            
+        # x_t_torch = torch.tensor(x_t).float().to(self.device)
+        # pred_score_t = self.diffuser.score(x_t=x_t_torch, x_0=pred_x_0, t=t, use_torch=True)
+
+        # score_mse = (gt_score_t - pred_score_t)**2
+        # score_loss = torch.sum(
+        #     score_mse / score_scaling[None, None]**2,
+        #     dim=(-1, -2)
+        # ) 
+
+        # self.log('train/score_mse_loss', loss.item())
+        self.log('train/x_0_mse', torch.mean((x - pred_x_0) ** 2).item())
+        return loss
 
 class CellGP(pl.LightningModule):
     def __init__(
@@ -309,7 +389,7 @@ class CellGP(pl.LightningModule):
         self.log("val_loss", loss, sync_dist=True)
 
     def _shared_eval_step(self, batch, batch_idx):
-        gid, equal_width_bins, equal_area_bins = batch
+        gid, equal_width_bins, equal_area_bins, _ = batch #NOTE: No condition token in pretrained CellGP
         no_mask = self._mask_with_tokens(gid, self.mask_ignore_token_ids)
         pad_mask = ~no_mask
 
@@ -329,7 +409,7 @@ def fixed_bin_collate(batch, extra_tokens, max_gid, genes, n_bins):
     """
     Collate function for dataloader providing binning on a per cell basis
     
-    - batch: tuple of (gid, counts, med, condition)
+    - batch: tuple of (gid, counts, med, cond_token)
     
     """
 
@@ -340,11 +420,15 @@ def fixed_bin_collate(batch, extra_tokens, max_gid, genes, n_bins):
 
     # this array allows us to remap vocab integers to integers between 0-1
     index = torch.zeros((n_batch, max_gid + 1), dtype=torch.float)
+    condition = torch.zeros((n_batch, 1), dtype=torch.int)
 
-    for i, (gid, counts, med) in enumerate(batch): #TODO Add condition here.
+    for i, (gid, counts, med, cond_token) in enumerate(batch):
+        # print('gid', gid, 'counts', counts, 'med', med, 'cond_token', cond_token)
         counts_t = torch.tensor(counts)
-        index[i, torch.tensor(gid)] = torch.log1p(counts_t * med / counts_t.sum())
-
+        # non_zero_gid = torch.tensor(gid, dtype=torch.long)[counts_t > 0]
+        index[i, gid] = torch.log1p(counts_t * med / counts_t.sum())
+        condition[i] = cond_token
+    
     fixed_exp = index[:, genes_t]
     fixed_gid = (
         torch.vstack(
@@ -358,18 +442,19 @@ def fixed_bin_collate(batch, extra_tokens, max_gid, genes, n_bins):
         equal_area_bins(fixed_exp, n_bins) + len(genes) + extra_tokens + n_bins
     )
 
-    return fixed_gid, fixed_eq_width_bin, fixed_eq_area_bin
+    return fixed_gid, fixed_eq_width_bin, fixed_eq_area_bin, condition
 
 
 def test_collate():
     batch = [[list(range(10)), list(range(10)), 5], [[1, 2, 3], [1, 2, 3], 5]]
-    fg, ewb, eab = fixed_bin_collate(batch, 2, 10, [3, 4, 5, 6, 7], n_bins=2)
+    fg, ewb, eab, _ = fixed_bin_collate(batch, 2, 10, [3, 4, 5, 6, 7], n_bins=2)
     print(fg, ewb, eab)
     breakpoint()
 
 
 class SCDataset(Dataset):
     def __init__(self, path):
+        raise NotImplementedError
         self.hf = h5.File(path)
 
     def __len__(self):
@@ -461,37 +546,47 @@ class PcvrAnnDataDataset(Dataset):
         self.categories = categories
         self.include_index = include_index
         self.pca = pca
+        self.gid = np.array(self.adata.var['gid'].values, dtype=np.int64)
+        self.med = self.adata.obs['med'].values[0] #constant across all cells.
 
     def __len__(self):
         return len(self.adata)
 
     def __getitem__(self, idx):
         '''
-        Returns a tuple of (gid, counts, median) for Pcvr model.
+        Returns a tuple of (gid, counts, median, condition) for Pcvr model.
         '''
         
         if self.pca:
-            value = self.adata.obsm['X_pca'][idx]
+            X = self.adata.obsm['X_pca'][idx]
         else:
-            value = self.adata.X[idx]
+            X = self.adata.X[idx]
         
-        if isinstance(value, sparse.csc_matrix):
-            value = value.toarray()
+        if isinstance(X, sparse.csc_matrix) or isinstance(X, sparse.csr_matrix):
+            X = X.toarray()
             
-        assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
+        assert isinstance(X, np.ndarray), f"Expected np.ndarray, got {type(X)}"
         
-        if len(value.shape) > 1:
-            value = value.squeeze()
+        if len(X.shape) > 1:
+            X = X.squeeze()
+            
+        # value = self.gid, X, self.med
+        
+        non_zero_gid = self.gid[X > 0]
+        non_zero_X = X[X > 0]
 
         if self.obs is not None:
             category_value = self.adata.obs[self.obs].iloc[idx]
             if pd.isna(category_value):
-                return value, len(self.categories) + 1 #NOTE: We use +2 because we reserve +1 for the null condition index.
+                return non_zero_gid, non_zero_X, self.med, len(self.categories) + 1 #NOTE: We use +2 because we reserve +1 for the null condition index.
             
             meta = self.categories.index(category_value)
-            value = value, int(meta)
+            value = non_zero_gid, non_zero_X, self.med, int(meta)
+        else:
+            raise ValueError("Must provide obs column to use condition.")
 
         if self.include_index:
+            raise ValueError("include_index should not be called for Pcvr.")
             return self.adata.obs_names[idx], value
 
         return value
@@ -512,6 +607,8 @@ class AissaDM(DM):
         num_workers=16,
         timeout=5,
         collate_fn=None,
+        count_threshold=50,
+        symbol_to_ensg_dict=None,
     ):
         super().__init__(
             path,
@@ -526,24 +623,45 @@ class AissaDM(DM):
             timeout,
             collate_fn,
         )
+        assert symbol_to_ensg_dict is not None
+        
+        self.symbol_to_ensg_dict = symbol_to_ensg_dict
+        self.count_threshold = count_threshold
         
 
     def setup(self, stage: str = "default"):
         adata = sc.read_h5ad(self.path)
-        # adata = self.process_adata(adata)
+        
+        def process_adata(adata):
+            '''
+            Filter out cells with low counts and map gene symbols to ensg ids.
+            '''
+        
+            adata = adata[adata.obs['ncounts'] > self.count_threshold]
+            adata.var['ensg'] = adata.var.index.map(self.symbol_to_ensg_dict) 
+            
+            #Map ensg to vocab
+            vocab_pre_dot = {k.split('.')[0]: v for k, v in self.vocab.items()}
+            adata = adata[:, adata.var['ensg'].isna() == False]
+            adata.var['gid'] = adata.var['ensg'].map(vocab_pre_dot)
+            adata = adata[:, adata.var['gid'].isna() == False]
+            adata.obs['med'] = adata.obs['ncounts'].median()
+        
+            return adata
+        
+        adata = process_adata(adata)
 
-        self.dset = PcvrAnnDataDataset(adata, 'perturbation', categories=sorted(adata.obs[condition].cat.categories), pca=False)
+        self.dset = PcvrAnnDataDataset(adata, 'perturbation', categories=sorted(adata.obs['perturbation'].cat.categories), pca=False)
 
-
-        self.dset = SCDataset(self.path)
+        # self.dset = SCDataset(self.path)
         self.dset_train, self.dset_val, self.dset_test = random_split(
             self.dset,
             [self.train_percentage, self.val_percentage, self.test_percentage],
         )
 
 if __name__ == "__main__":
-    original_vocab = read_vocab("../../../vocab.json")
-    with open("../../../run_encoder/ccle_vocab_genes.json", "r") as inf:
+    original_vocab = read_vocab("/data/rsg/nlp/ujp/cellgp/vocab.json")
+    with open("/data/rsg/nlp/ujp/cellgp/run_encoder/ccle_vocab_genes.json", "r") as inf:
         ccle_vocab_genes = sorted(json.load(inf))
     BINS = 64
     tokenizer = Tokenizer()
@@ -576,17 +694,23 @@ if __name__ == "__main__":
         seq_dropout_prob=0.1,
     )
 
-    dm = DM(
-        "/storage/ujp/processed_raw.h5",
-        vocab=tokenizer,
+    to_ensg_path = '/data/rsg/nlp/ujp/cellgp/datasets/nano_hugo_to_ensg.pkl'
+    with open(to_ensg_path, 'rb') as f:
+        to_ensg = pickle.load(f)
+
+    # tokenizer.add_tokens(original_vocab)
+
+    dm = AissaDM(
+        "/Mounts/rbg-storage1/users/johnyang/cellot/datasets/AissaBenevolenskaya2021.h5ad",
+        vocab=original_vocab,
         subset_genes=ccle_vocab_genes,
         nbins=BINS,
         train_percentage=0.85,
         val_percentage=0.10,
         test_percentage=0.05,
         batch_size=48,
-        num_workers=64,
-        timeout=5,
+        num_workers=1, #TODO: Change this
+        timeout=10,
         collate_fn=partial(
             fixed_bin_collate,
             extra_tokens=extra_tokens,
@@ -594,22 +718,29 @@ if __name__ == "__main__":
             genes=ccle_vocab_genes,
             n_bins=BINS,
         ),
+        symbol_to_ensg_dict=to_ensg,
+        count_threshold=50,
     )
     # trainer = pl.Trainer(
     #     accelerator="cpu",
     #     precision=32,
     #     max_epochs=1,
     # )
+    
+    import os
+    os.environ["WANDB_MODE"] = "dryrun" 
+
 
     wandb_logger = WandbLogger(log_model="all", project="CellGP_Encoder")
     cback = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1)
     trainer = pl.Trainer(
         accelerator="gpu",
         strategy="ddp_find_unused_parameters_true",
-        devices=8,
+        devices=[1],
         precision=16,
         max_epochs=11,
         logger=wandb_logger,
         callbacks=[cback],
+        fast_dev_run=True, #TODO: Remove this
     )
     trainer.fit(model, dm)
