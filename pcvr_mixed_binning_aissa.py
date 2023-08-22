@@ -1,4 +1,3 @@
-# %%
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -16,32 +15,15 @@ from torch import nn, einsum
 import json
 import glob
 
+from cellgp.datasets import read_vocab
+from cellgp.tokenizer import Tokenizer
+from cellgp.utils import equal_area_bins, equal_width_bins
 import h5py as h5
 from functools import partial
 import numpy as np
 
-import scanpy as sc
-from cellot.data.cell import AnnDataDataset
+from torch.utils.data import Dataset
 
-
-# %%
-
-
-VOCAB_SIZE = 60873
-
-MAX_LEN = 18976
-
-DEFAULT_ENCODING = "utf-8"
-
-DEFAULT_BINS = 10
-
-
-# %%
-
-
-def read_vocab(path):
-    with open(path, "r", encoding=DEFAULT_ENCODING) as inf:
-        return {gene: i for i, gene in enumerate(json.load(inf))}
 
 
 def exists(val):
@@ -124,10 +106,6 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 
-# Main classes #####################################################################################
-####################################################################################################
-
-
 class Encoder(pl.LightningModule):
     def __init__(
         self,
@@ -145,7 +123,8 @@ class Encoder(pl.LightningModule):
         latent_dim_head,
         weight_tie_layers,
         seq_dropout_prob,
-        nbins: int = DEFAULT_BINS,
+        max_len: int,
+        emb_size: int,
     ):
         super().__init__()
         self.mask_ignore_token_ids = set(mask_ignore_token_ids)
@@ -171,13 +150,40 @@ class Encoder(pl.LightningModule):
 
         self.seq_dropout_prob = seq_dropout_prob
 
-        self.queries = torch.randn(MAX_LEN, self.emb_dim)  # latent_dim
-        self.emb = nn.Embedding(VOCAB_SIZE + nbins + 2, self.emb_dim)
-        self.pos_emb = nn.Embedding(MAX_LEN, self.emb_dim)  # +1 for exp
+        self.queries = torch.randn(max_len, self.emb_dim)  # latent_dim
+        self.emb = nn.Embedding(emb_size, self.emb_dim)
+        # self.pos_emb = nn.Embedding(max_len, self.emb_dim)  # +1 for exp
 
-    def forward(self, gid, bin_t, pad_mask):
+    def _prob_mask_like(self, t, prob):
+        return torch.zeros_like(t).float().uniform_(0, 1) < prob
+
+    def _get_mask_subset_with_prob(self, t, mask, prob):
+        batch, seq_len, device = *mask.shape, mask.device
+        max_masked = math.ceil(prob * seq_len)
+
+        num_tokens = mask.sum(dim=-1, keepdim=True)
+        mask_excess = mask.cumsum(dim=-1) > (num_tokens * prob).ceil()
+        mask_excess = mask_excess[:, :max_masked]
+
+        rand = torch.rand((batch, seq_len), device=device).masked_fill(~mask, -1e9)
+        _, sampled_indices = rand.topk(max_masked, dim=-1)
+        sampled_indices = (sampled_indices + 1).masked_fill_(mask_excess, 0)
+
+        new_mask = torch.zeros((batch, seq_len + 1), device=device)
+        new_mask.scatter_(-1, sampled_indices, 1)
+        return new_mask[:, 1:].bool()
+
+    def forward(self, gid, eq_width_bin, eq_area_bin, pad_mask):
+        # if masked training
+        if self.training and self.mask_prob > 0:
+            mask = self._get_mask_subset_with_prob(gid, pad_mask, self.mask_prob)
+            gid = gid.masked_fill(mask, self.mask_token_id)
+            eq_width_bin = eq_width_bin.masked_fill(mask, self.mask_token_id)
+            eq_area_bin = eq_area_bin.masked_fill(mask, self.mask_token_id)
+
         x = self.emb(gid)
-        x += self.emb(bin_t)
+        x += self.emb(eq_width_bin)
+        x += self.emb(eq_area_bin)
 
         # n, device = x.shape[1], x.device
         # pos_emb = self.pos_emb(torch.arange(n, device=device))
@@ -213,11 +219,15 @@ class Decoder(pl.LightningModule):
 class CellGP(pl.LightningModule):
     def __init__(
         self,
+        nbins,
+        max_len,
+        genes,
+        extra_tokens,
+        emb_size,
         lr=1e-4,
         mask_prob=0.15,
         mask_ignore_token_ids=[0],
         mask_token_id=1,
-        pad_token_id=0,
         emb_dim=256,
         logits_dim_enc=None,
         logits_dim_dec=1,
@@ -230,18 +240,14 @@ class CellGP(pl.LightningModule):
         latent_dim_head=64,
         weight_tie_layers=False,
         seq_dropout_prob=0.1,
-        nbins: int = DEFAULT_BINS,
-        tokenizer=None,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.lr = lr
-        assert tokenizer is not None
 
-        self.mask_prob = mask_prob
-        self.mask_token_id = mask_token_id
-        self.pad_token_id = pad_token_id
-        self.tokenizer = tokenizer
+        self.extra_tokens = extra_tokens
+        self.nbins = nbins
+        self.genes = genes
 
         self.encoder = Encoder(
             mask_prob,
@@ -258,56 +264,36 @@ class CellGP(pl.LightningModule):
             latent_dim_head,
             weight_tie_layers,
             seq_dropout_prob,
-            nbins=nbins,
+            max_len=max_len,
+            emb_size=emb_size,
         )
 
         self.decoder = Decoder(
             emb_dim,
-            logits_dim=logits_dim_dec,
+            logits_dim=nbins,
             latent_dim=latent_dim,
             cross_heads=cross_heads,
             cross_dim_head=cross_dim_head,
             decoder_ff=True,
         )
 
-        # self.decoder = MLPDecoder(
-        #    emb_dim,
-        # )
-
         for p in self.parameters():
             p.requires_grad_()
 
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss(
+            reduction="sum"
+        )  # divide by the appropriate
         self.mask_ignore_token_ids = set(mask_ignore_token_ids)
 
-    def forward(self, gid, bin_t, pad_mask):
-        x_emb, z = self.encoder(gid, bin_t, pad_mask)
-        bin_hat = self.decoder(x_emb, z)
-        return bin_hat
+    def forward(self, gid, equal_width_bins, equal_area_bins, pad_mask):
+        x_emb, z = self.encoder(gid, equal_width_bins, equal_area_bins, pad_mask)
+        out = self.decoder(x_emb, z)
+        return out
 
     def _mask_with_tokens(self, t, token_ids):
         init_no_mask = torch.full_like(t, False, dtype=torch.bool)
         mask = reduce(lambda acc, el: acc | (t == el), token_ids, init_no_mask)
         return mask
-
-    def _prob_mask_like(self, t, prob):
-        return torch.zeros_like(t).float().uniform_(0, 1) < prob
-
-    def _get_mask_subset_with_prob(self, t, mask, prob):
-        batch, seq_len, device = *mask.shape, mask.device
-        max_masked = math.ceil(prob * seq_len)
-
-        num_tokens = mask.sum(dim=-1, keepdim=True)
-        mask_excess = mask.cumsum(dim=-1) > (num_tokens * prob).ceil()
-        mask_excess = mask_excess[:, :max_masked]
-
-        rand = torch.rand((batch, seq_len), device=device).masked_fill(~mask, -1e9)
-        _, sampled_indices = rand.topk(max_masked, dim=-1)
-        sampled_indices = (sampled_indices + 1).masked_fill_(mask_excess, 0)
-
-        new_mask = torch.zeros((batch, seq_len + 1), device=device)
-        new_mask.scatter_(-1, sampled_indices, 1)
-        return new_mask[:, 1:].bool()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -315,7 +301,7 @@ class CellGP(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss = self._shared_eval_step(batch, batch_idx)
-        self.log("train_loss", loss)
+        self.log("train_loss", loss, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -323,80 +309,63 @@ class CellGP(pl.LightningModule):
         self.log("val_loss", loss, sync_dist=True)
 
     def _shared_eval_step(self, batch, batch_idx):
-        gid_orig, bin_orig, mask_zero_batch = batch
-        no_mask = self._mask_with_tokens(gid_orig, self.mask_ignore_token_ids) #True cannot be masked, False can be masked.
-        pad_mask = ~no_mask #False cannot be masked, True can be masked.
-        gid_max = gid_orig.max()
-        
-        # if masked training
-        if self.mask_prob > 0:
-            no_zero_mask = no_mask | mask_zero_batch #True cannot be masked, False can be masked.
-            true_can_mask = ~no_zero_mask #False cannot be masked, True can be masked.
-            
-            mask = self._get_mask_subset_with_prob(gid_orig, true_can_mask, self.mask_prob)
-            gid_t = gid_orig.masked_fill(mask, self.mask_token_id)
-            bin_t = bin_orig.masked_fill(mask, self.mask_token_id)
+        gid, equal_width_bins, equal_area_bins = batch
+        no_mask = self._mask_with_tokens(gid, self.mask_ignore_token_ids)
+        pad_mask = ~no_mask
 
-        bin_hat = self(gid_t, bin_t, pad_mask)
+        bin_hat = self(gid, equal_width_bins, equal_area_bins, pad_mask)
 
-        bin_hat_batch = torch.cat(
-            [bin_hat[i, mask[i, :]] for i in range(bin_hat.shape[0])]
+        no_reduc = self.criterion(
+            rearrange(bin_hat, "b g c -> b c g"),
+            equal_area_bins - len(self.genes) - self.extra_tokens - self.nbins,
         )
-        bin_orig_batch = torch.cat(
-            [bin_orig[i, mask[i, :]] - gid_max - 1 for i in range(bin_orig.shape[0])],
-        )
-        loss = self.criterion(bin_hat_batch, bin_orig_batch)
+        non_zero_elements = pad_mask.sum()
+        loss = no_reduc / non_zero_elements
+
         return loss
 
 
-def fixed_bin_collate(batch, vocab, genes, bins, adata):
+def fixed_bin_collate(batch, extra_tokens, max_gid, genes, n_bins):
     """
     Collate function for dataloader providing binning on a per cell basis
+    
+    - batch: tuple of (gid, counts, med, condition)
+    
     """
-    assert bins > 0
-    bins = (
-        bins - 2
-    )  # searchsorted produces an extra bin on the left or right, and zero genes should get bin 0
-    extra_tokens = 2
+
+    n_batch = len(batch)
+
+    # these are indices in the original vocabulary that we want for the fixed representation
+    genes_t = torch.tensor(genes)
 
     # this array allows us to remap vocab integers to integers between 0-1
-    index = torch.full((max(vocab.values()) + 1,), -1, dtype=torch.int64)
-    index[genes] = torch.arange(0, len(genes), dtype=torch.int64)
+    index = torch.zeros((n_batch, max_gid + 1), dtype=torch.float)
 
-    gid_batch = torch.zeros((len(batch), len(genes)), dtype=torch.int64)
-    bins_batch = torch.full(
-        (len(batch), len(genes)), len(genes) + extra_tokens, dtype=torch.int64
-    )
-    mask_zero_batch = torch.zeros((len(batch), len(genes)), dtype=torch.bool)
+    for i, (gid, counts, med) in enumerate(batch): #TODO Add condition here.
+        counts_t = torch.tensor(counts)
+        index[i, torch.tensor(gid)] = torch.log1p(counts_t * med / counts_t.sum())
 
-    # import ipdb
-    # ipdb.set_trace()
-        
-    for i, (x, y) in enumerate(batch):
-
-
-        gid_t = torch.tensor(gid, dtype=torch.int64)
-        gid_batch[i] = index[genes] + extra_tokens
-        exp_t = torch.tensor(exp)
-        
-        mask_zero = (exp_t == 1)
-        mask_gid_not_in_genes = index[gid_t] == -1
-        mask_ = mask_zero | mask_gid_not_in_genes
-        valid_mask = index[gid_t[mask_]] != -1
-        valid_indices = index[gid_t[mask_]][valid_mask]
-        mask_zero_batch[i, valid_indices] = True
-        
-        exp_t = exp_t[index[gid_t] != -1]
-        exp_t = torch.log1p(exp_t * med / exp_t.sum())
-        bin_e = torch.linspace(exp_t.min(), exp_t.max(), bins)
-        bins_batch[i, index[gid_t[index[gid_t] != -1]]] = (
-            torch.searchsorted(bin_e, exp_t, side="right")
-            + len(genes)
-            + extra_tokens
-            + 1
+    fixed_exp = index[:, genes_t]
+    fixed_gid = (
+        torch.vstack(
+            [torch.arange(0, len(genes), dtype=torch.int64) for _ in range(n_batch)]
         )
+        + extra_tokens
+    )
 
-    return gid_batch, bins_batch, mask_zero_batch
+    fixed_eq_width_bin = equal_width_bins(fixed_exp, n_bins) + len(genes) + extra_tokens
+    fixed_eq_area_bin = (
+        equal_area_bins(fixed_exp, n_bins) + len(genes) + extra_tokens + n_bins
+    )
+
+    return fixed_gid, fixed_eq_width_bin, fixed_eq_area_bin
+
+
+def test_collate():
+    batch = [[list(range(10)), list(range(10)), 5], [[1, 2, 3], [1, 2, 3], 5]]
+    fg, ewb, eab = fixed_bin_collate(batch, 2, 10, [3, 4, 5, 6, 7], n_bins=2)
+    print(fg, ewb, eab)
+    breakpoint()
 
 
 class SCDataset(Dataset):
@@ -423,48 +392,27 @@ class DM(pl.LightningDataModule):
         batch_size=16,
         num_workers=16,
         timeout=5,
+        collate_fn=None,
     ):
         super().__init__()
+        assert collate_fn is not None
         self.path = path
 
         self.nbins = nbins
         self.vocab = vocab
-        
-        self.subset_genes = subset_genes
-        
+        self.collate_fn = collate_fn
         self.train_percentage = train_percentage
         self.val_percentage = val_percentage
         self.test_percentage = test_percentage
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.timeout = timeout
-        
-    def process_adata(self, adata):
-        raise NotImplementedError
 
     def setup(self, stage: str = "default"):
-        adata = sc.read_h5ad(self.path)
-        
-        adata = self.process_adata(adata)
-        
-        self.collate_fn = partial(
-            fixed_bin_collate,
-            vocab=self.vocab,
-            genes=self.subset_genes,
-            bins=self.nbins,
-            adata=adata,
-        )
-        
-        condition = 'perturbation'
-        self.dset = AnnDataDataset(adata, 'perturbation', categories=sorted(adata.obs[condition].cat.categories), pca=False)
-        
-        val_size = int(self.val_percentage * len(self.dset))
-        test_size = int(self.test_percentage * len(self.dset))
-        train_size = len(self.dset) - val_size - test_size
-        
+        self.dset = SCDataset(self.path)
         self.dset_train, self.dset_val, self.dset_test = random_split(
             self.dset,
-            [ train_size, val_size, test_size ],
+            [self.train_percentage, self.val_percentage, self.test_percentage],
         )
 
     def train_dataloader(self):
@@ -503,8 +451,54 @@ class DM(pl.LightningDataModule):
     def teardown(self, stage: str):
         pass
     
-class AissaDM(DM):
+class PcvrAnnDataDataset(Dataset):
+    def __init__(
+        self, adata, obs=None, categories=None, include_index=False, dim_red=None, pca=False,
+    ):
+        self.adata = adata
+        self.adata.X = self.adata.X.astype(np.float32)
+        self.obs = obs
+        self.categories = categories
+        self.include_index = include_index
+        self.pca = pca
 
+    def __len__(self):
+        return len(self.adata)
+
+    def __getitem__(self, idx):
+        '''
+        Returns a tuple of (gid, counts, median) for Pcvr model.
+        '''
+        
+        if self.pca:
+            value = self.adata.obsm['X_pca'][idx]
+        else:
+            value = self.adata.X[idx]
+        
+        if isinstance(value, sparse.csc_matrix):
+            value = value.toarray()
+            
+        assert isinstance(value, np.ndarray), f"Expected np.ndarray, got {type(value)}"
+        
+        if len(value.shape) > 1:
+            value = value.squeeze()
+
+        if self.obs is not None:
+            category_value = self.adata.obs[self.obs].iloc[idx]
+            if pd.isna(category_value):
+                return value, len(self.categories) + 1 #NOTE: We use +2 because we reserve +1 for the null condition index.
+            
+            meta = self.categories.index(category_value)
+            value = value, int(meta)
+
+        if self.include_index:
+            return self.adata.obs_names[idx], value
+
+        return value
+
+
+class AissaDM(DM):
+    
     def __init__(
         self,
         path,
@@ -517,6 +511,7 @@ class AissaDM(DM):
         batch_size=16,
         num_workers=16,
         timeout=5,
+        collate_fn=None,
     ):
         super().__init__(
             path,
@@ -529,109 +524,92 @@ class AissaDM(DM):
             batch_size,
             num_workers,
             timeout,
+            collate_fn,
         )
-    
-    def process_adata(self, adata):
-        '''
-        Subset genes that we can easily convert gene_symbols to Ensembl IDs
-        Throw out cells with 0 or 1 count. TODO: Knee plot analysis
-        '''
         
-        raise NotImplementedError
-    
+
+    def setup(self, stage: str = "default"):
+        adata = sc.read_h5ad(self.path)
+        # adata = self.process_adata(adata)
+
+        self.dset = PcvrAnnDataDataset(adata, 'perturbation', categories=sorted(adata.obs[condition].cat.categories), pca=False)
 
 
+        self.dset = SCDataset(self.path)
+        self.dset_train, self.dset_val, self.dset_test = random_split(
+            self.dset,
+            [self.train_percentage, self.val_percentage, self.test_percentage],
+        )
 
+if __name__ == "__main__":
+    original_vocab = read_vocab("../../../vocab.json")
+    with open("../../../run_encoder/ccle_vocab_genes.json", "r") as inf:
+        ccle_vocab_genes = sorted(json.load(inf))
+    BINS = 64
+    tokenizer = Tokenizer()
+    extra_tokens = 2
 
-# %%
-def test_collate():
-    vocab = {v: k for k, v in enumerate("abcdefghij")}
-    genes = [1, 2, 5]
-    bins = 3
-    print(vocab)
-   
-   
-    gid = [2, 3, 4, 5]
-    exp = [0, 1, 0, 1]
-    med = 5
-    batch = [[gid, exp, med]]
-    print(fixed_bin_collate(batch, vocab, genes, bins))
+    # test_collate()
+    extra_tokens = 2
 
-# %%
-tokenizer = read_vocab("vocab_ccle.json")
-VOCAB_SIZE = len(tokenizer)
-BINS = 64
+    model = CellGP(
+        nbins=BINS,
+        max_len=len(ccle_vocab_genes),
+        genes=ccle_vocab_genes,
+        extra_tokens=extra_tokens,
+        emb_size=len(ccle_vocab_genes) + extra_tokens + 2 * BINS,
+        lr=1e-4,
+        mask_prob=0.5,
+        mask_ignore_token_ids=[0],
+        mask_token_id=1,
+        emb_dim=256,
+        logits_dim_enc=None,
+        logits_dim_dec=BINS,
+        depth=8,
+        num_latents=256,
+        latent_dim=256,
+        cross_heads=1,
+        latent_heads=8,
+        cross_dim_head=256,
+        latent_dim_head=256,
+        weight_tie_layers=False,
+        seq_dropout_prob=0.1,
+    )
 
-# %%
-with open("notebooks/ccle_vocab_genes.json", "r") as inf:
-    ccle_vocab_genes = sorted(json.load(inf))
-MAX_LEN = len(ccle_vocab_genes)
+    dm = DM(
+        "/storage/ujp/processed_raw.h5",
+        vocab=tokenizer,
+        subset_genes=ccle_vocab_genes,
+        nbins=BINS,
+        train_percentage=0.85,
+        val_percentage=0.10,
+        test_percentage=0.05,
+        batch_size=48,
+        num_workers=64,
+        timeout=5,
+        collate_fn=partial(
+            fixed_bin_collate,
+            extra_tokens=extra_tokens,
+            max_gid=max(original_vocab.values()),
+            genes=ccle_vocab_genes,
+            n_bins=BINS,
+        ),
+    )
+    # trainer = pl.Trainer(
+    #     accelerator="cpu",
+    #     precision=32,
+    #     max_epochs=1,
+    # )
 
-# %%
-original_path = '/Mounts/rbg-storage1/users/johnyang/cellot/datasets/AissaBenevolenskaya2021.h5ad'
-
-dm = AissaDM(
-    original_path,
-    vocab=tokenizer,
-    subset_genes=ccle_vocab_genes,
-    nbins=BINS,
-    train_percentage=0.85,
-    val_percentage=0.10,
-    test_percentage=0.05,
-    batch_size=16,
-    num_workers=16,
-    timeout=5,
-)
-
-# %%
-# test_collate()
-
-# %%
-import os
-os.environ["WANDB_MODE"] = "dryrun"
-
-# %%
-
-model = CellGP(
-    lr=1e-4,
-    mask_prob=0.5,
-    mask_ignore_token_ids=[0],
-    mask_token_id=1,
-    emb_dim=256,
-    logits_dim_enc=None,
-    logits_dim_dec=BINS,
-    depth=8,
-    num_latents=256,
-    latent_dim=256,
-    cross_heads=1,
-    latent_heads=8,
-    cross_dim_head=256,
-    latent_dim_head=256,
-    weight_tie_layers=False,
-    seq_dropout_prob=0.1,
-    nbins=BINS,
-    tokenizer=tokenizer,
-)
-
-# trainer = pl.Trainer(
-#     accelerator="cpu",
-#     precision=32,
-#     max_epochs=1,
-# )
-
-wandb_logger = WandbLogger(log_model="all", project="CellGP_Encoder")
-cback = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1)
-trainer = pl.Trainer(
-    accelerator="gpu",
-    strategy="auto",
-    devices=[2],
-    precision=16,
-    max_epochs=11,
-    logger=wandb_logger,
-    callbacks=[cback],
-    fast_dev_run=True,
-)
-trainer.fit(model, dm)
-
-
-
+    wandb_logger = WandbLogger(log_model="all", project="CellGP_Encoder")
+    cback = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1)
+    trainer = pl.Trainer(
+        accelerator="gpu",
+        strategy="ddp_find_unused_parameters_true",
+        devices=8,
+        precision=16,
+        max_epochs=11,
+        logger=wandb_logger,
+        callbacks=[cback],
+    )
+    trainer.fit(model, dm)
