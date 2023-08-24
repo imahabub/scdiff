@@ -12,6 +12,7 @@ cellot/train/artifacts/
 runs/
 outputs/
 wandb/
+artifacts/
 
 # mac
 .DS_Store

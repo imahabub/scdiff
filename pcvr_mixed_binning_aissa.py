@@ -26,6 +26,7 @@ from functools import partial
 import numpy as np
 
 import pickle
+import wandb
 from torch.utils.data import Dataset
 import scanpy as sc
 from scipy import sparse
@@ -772,6 +773,15 @@ class AissaDM(DM):
             [self.train_percentage, self.val_percentage, self.test_percentage],
         )
     
+
+def get_ckpt_path_from_run_id(id, project_name, team_name):
+    run = wandb.init(project=project_name, entity=team_name, resume='must', id=id)
+    artifact = run.use_artifact(f'model-{id}:best')
+    artifact_dir = artifact.download()
+    ckpt_path = f'{artifact_dir}/model.ckpt'
+    print(f'LOADED WANDB ARTIFACT CHECKPOINT PATH: {ckpt_path}')
+    return ckpt_path
+    
 def main(args):
     # Configuration
     cfg = {
@@ -845,7 +855,13 @@ def main(args):
         seq_dropout_prob=0.1,
     )
     
-    lm = PcvrLatentScoreModule(cfg, cellgp)
+    # Load or initialize the model
+    if args.WARM_START:
+        ckpt_path = args.WARM_START_PATH if args.WANDB_RUN_ID is None else get_ckpt_path_from_run_id(args.WANDB_RUN_ID, args.project_name, args.team_name)
+        lm = PcvrLatentScoreModule.load_from_checkpoint(checkpoint_path=ckpt_path, hparams=cfg, cellgp=cellgp)
+        args.name = args.name + '_WS'
+    else:
+        lm = PcvrLatentScoreModule(cfg, cellgp)
 
     to_ensg_path = '/data/rsg/nlp/ujp/cellgp/datasets/nano_hugo_to_ensg.pkl'
     with open(to_ensg_path, 'rb') as f:
@@ -898,6 +914,11 @@ if __name__ == "__main__":
     parser.add_argument('--devices', type=str, required=True, help='Comma-separated list of devices')
     parser.add_argument('--name', type=str, required=True, help='Name of experiment.')
     parser.add_argument('--use_hidden_attn', type=bool, default=True, help='Whether to use hidden attention in the latent score network.')
+    parser.add_argument('--WARM_START', type=bool, default=False, help='Whether to warm start from a previous run.')
+    parser.add_argument('--WARM_START_PATH', type=str, default=None, help='Path to checkpoint to warm start from.')
+    parser.add_argument('--WANDB_RUN_ID', type=str, default=None, help='Wandb run id to warm start from.')
+    parser.add_argument('--team_name', type=str, default='cellgp', help='Wandb team name.')
+    parser.add_argument('--project_name', type=str, default='sc_diff', help='Wandb project name.')
     parser.add_argument('--base', type=bool, default=False, help='Base configuration value.')
     parser.add_argument('--embed_dim', type=int, default=64, help='Embedding dimension.')
     parser.add_argument('--cond_classes', type=int, default=4, help='Number of condition classes.')
